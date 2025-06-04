@@ -2,7 +2,7 @@
 <project version="4">
   <component name="ProjectModuleManager">
     <modules>
-      <module fileurl="file://$PROJECT_DIR$/.idea/qubit-routing.iml" filepath="$PROJECT_DIR$/.idea/qubit-routing.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/quariadne.iml" filepath="$PROJECT_DIR$/.idea/quariadne.iml" />
     </modules>
   </component>
 </project>
