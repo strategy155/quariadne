@@ -36,3 +36,14 @@ class Gate:
     name: str
     # we don't want to include that field into representation because its ugly and uninformative
     parent_id: int = dataclasses.field(repr=False)
+
+
+@dataclasses.dataclass
+class Transition:
+    """
+    This class represents the transition between two computational nodes in the DAG.
+    """
+
+    from_node: RoutingNode
+    to_node: RoutingNode
+    qubit_index: int

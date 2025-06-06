@@ -5,14 +5,10 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="72376229-81b2-4aab-affa-e69c21520671" name="Changes" comment="finished designing initial nodes">
-      <change beforePath="$PROJECT_DIR$/.idea/misc.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/misc.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/quariadne.iml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/quariadne.iml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/notebook/MILP.ipynb" beforeDir="false" afterPath="$PROJECT_DIR$/notebook/MILP.ipynb" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/pyproject.toml" beforeDir="false" afterPath="$PROJECT_DIR$/pyproject.toml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/__init__.py" beforeDir="false" afterPath="$PROJECT_DIR$/quariadne/__init__.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/circuit.py" beforeDir="false" afterPath="$PROJECT_DIR$/quariadne/circuit.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/converters.py" beforeDir="false" afterPath="$PROJECT_DIR$/quariadne/converters.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/quariadne/circuit.py" beforeDir="false" afterPath="$PROJECT_DIR$/quariadne/circuit.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/quariadne/converters.py" beforeDir="false" afterPath="$PROJECT_DIR$/quariadne/converters.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -88,7 +84,7 @@
       <workItem from="1749033283705" duration="732000" />
       <workItem from="1749058612940" duration="3372000" />
       <workItem from="1749133355768" duration="106000" />
-      <workItem from="1749149356792" duration="662000" />
+      <workItem from="1749149356792" duration="1629000" />
     </task>
     <task id="LOCAL-00001" summary="initial steup probelms fixed, and this is obviously somethign like an iintila commit">
       <option name="closed" value="true" />
