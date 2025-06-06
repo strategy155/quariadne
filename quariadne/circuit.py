@@ -1,17 +1,23 @@
 import dataclasses
 
 
-type RoutingNode = LogicalQubit | Gate
+type RoutingNode = WireStart | WireEnd | Gate
 
 
 @dataclasses.dataclass(frozen=True)
-class LogicalQubit:
+class WireStart:
     """
-    This is a class, which represents the logical qubit (or wire, in some terminology
-    -- this terminology comes from the quantum circuit model).
+    This is a class, which represents the DAG wire start.
     """
 
-    is_start: bool
+    index: int
+
+
+@dataclasses.dataclass(frozen=True)
+class WireEnd:
+    """ "
+    This is a class, which represents the end of the DAG"""
+
     index: int
 
 
