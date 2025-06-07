@@ -1,7 +1,9 @@
 import dataclasses
 import typing
+import networkx as nx
 
 type RoutingNode = WireStart | WireEnd | Gate
+type NXEdge = typing.Tuple[RoutingNode, RoutingNode]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -48,12 +50,53 @@ class Transition:
     to_node: RoutingNode
     qubit_index: int
 
+    def as_nx_edge(self):
+        """
+        Converts the current edge to a NetworkX-compatible edge representation.
+
+        Returns the edge as a tuple containing the source node and target node,
+        which can be used directly with NetworkX graphs.
+
+        :return nx_edge: Edge as a tuple containing the source node and target node.
+        :rtype NXEdge:
+        """
+        nx_edge = (
+            self.from_node,
+            self.to_node,
+        )
+        return nx_edge
+
 
 @dataclasses.dataclass
 class RoutingCircuit:
     """
     This class represents a circuit abstraction, containing only relevant objects for routing
+
+
     """
 
     nodes: typing.List[RoutingNode]
     transitions: typing.List[Transition]
+
+    def as_nx_digraph(self):
+        """
+        Converts the routing circuit into a directed graph in the NetworkX format.
+
+        This method provides functionality to represent the graph in the NetworkX
+        directed graph format for interoperability with other libraries.
+
+        :return nx_digraph: Routing circuit as DAG in the NetworkX format.
+        :rtype nx.DiGraph:
+        """
+
+        # creating a stub graph and filling it with the computational nodes
+        random_routing_dag = nx.DiGraph()
+        random_routing_dag.add_nodes_from(self.nodes)
+
+        # converting the transitions to edges
+        transitions_as_edges = (
+            transition.as_nx_edge() for transition in self.transitions
+        )
+        random_routing_dag.add_edges_from(transitions_as_edges)
+
+        return random_routing_dag

@@ -19,3 +19,9 @@ package = true
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "sphinx>=8.2.3",
+    "types-networkx>=3.5.0.20250531",
+]
