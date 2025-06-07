@@ -4,7 +4,7 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="72376229-81b2-4aab-affa-e69c21520671" name="Changes" comment="finished designing initial nodes">
+    <list default="true" id="72376229-81b2-4aab-affa-e69c21520671" name="Changes" comment="added transition related scripts">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/notebook/MILP.ipynb" beforeDir="false" afterPath="$PROJECT_DIR$/notebook/MILP.ipynb" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/quariadne/circuit.py" beforeDir="false" afterPath="$PROJECT_DIR$/quariadne/circuit.py" afterDir="false" />
@@ -84,7 +84,8 @@
       <workItem from="1749033283705" duration="732000" />
       <workItem from="1749058612940" duration="3372000" />
       <workItem from="1749133355768" duration="106000" />
-      <workItem from="1749149356792" duration="1629000" />
+      <workItem from="1749149356792" duration="2071000" />
+      <workItem from="1749297069445" duration="663000" />
     </task>
     <task id="LOCAL-00001" summary="initial steup probelms fixed, and this is obviously somethign like an iintila commit">
       <option name="closed" value="true" />
@@ -102,7 +103,15 @@
       <option name="project" value="LOCAL" />
       <updated>1749058655708</updated>
     </task>
-    <option name="localTasksCounter" value="3" />
+    <task id="LOCAL-00003" summary="added transition related scripts">
+      <option name="closed" value="true" />
+      <created>1749214144663</created>
+      <option name="number" value="00003" />
+      <option name="presentableId" value="LOCAL-00003" />
+      <option name="project" value="LOCAL" />
+      <updated>1749214144664</updated>
+    </task>
+    <option name="localTasksCounter" value="4" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -112,6 +121,7 @@
     <MESSAGE value="initial steup probelms fixed, and this is obviously somethign like an iintila w" />
     <MESSAGE value="initial steup probelms fixed, and this is obviously somethign like an iintila commit" />
     <MESSAGE value="finished designing initial nodes" />
-    <option name="LAST_COMMIT_MESSAGE" value="finished designing initial nodes" />
+    <MESSAGE value="added transition related scripts" />
+    <option name="LAST_COMMIT_MESSAGE" value="added transition related scripts" />
   </component>
 </project>

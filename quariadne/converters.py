@@ -71,3 +71,35 @@ def convert_qiskit_dag_edge(qiskit_dag_edge: QiskitDAGEdge):
         in_routing_node, out_routing_node, wire_index
     )
     return transition
+
+
+def convert_qiskit_dag(qiskit_dag: qiskit.dagcircuit.DAGCircuit):
+    """
+    This function takes qiskit dag circuit as input, and converts it to internal routing circuit representation.
+    :param qiskit_dag: a qiskit dag circuit object, which is easily obtained from qiskit circuit.
+    :return: returns the corresponding routing circuit object, representing the information in the dag.
+    :rtype: quariadne.circuit.RoutingCircuit
+    """
+    # obtaining generators for nodes and edges
+    random_dag_nodes = qiskit_dag.nodes()
+    random_dag_edges = qiskit_dag.edges()
+
+    # preparing the arrays for nodes and transitions, then iterating through the corresponding qiskit generators
+    # and filling the helper arrays
+    circuit_nodes = []
+    circuit_transitions = []
+    for node in random_dag_nodes:
+        circuit_node = convert_qiskit_dag_node(node)
+        circuit_nodes.append(circuit_node)
+
+    for edge in random_dag_edges:
+        circuit_transition = convert_qiskit_dag_edge(edge)
+        circuit_transitions.append(circuit_transition)
+
+    # forming a resulting routing representation
+
+    routing_circuit = quariadne.circuit.RoutingCircuit(
+        circuit_nodes, circuit_transitions
+    )
+
+    return routing_circuit

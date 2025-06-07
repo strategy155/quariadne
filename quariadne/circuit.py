@@ -1,5 +1,5 @@
 import dataclasses
-
+import typing
 
 type RoutingNode = WireStart | WireEnd | Gate
 
@@ -47,3 +47,13 @@ class Transition:
     from_node: RoutingNode
     to_node: RoutingNode
     qubit_index: int
+
+
+@dataclasses.dataclass
+class RoutingCircuit:
+    """
+    This class represents a circuit abstraction, containing only relevant objects for routing
+    """
+
+    nodes: typing.List[RoutingNode]
+    transitions: typing.List[Transition]
