@@ -4,13 +4,10 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="72376229-81b2-4aab-affa-e69c21520671" name="Changes" comment="added circuit representing class&#10;added the circuit converter from qiskit dag">
+    <list default="true" id="72376229-81b2-4aab-affa-e69c21520671" name="Changes" comment="added documentation  generation to the module">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/notebook/MILP.ipynb" beforeDir="false" afterPath="$PROJECT_DIR$/notebook/MILP.ipynb" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/pyproject.toml" beforeDir="false" afterPath="$PROJECT_DIR$/pyproject.toml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/quariadne/circuit.py" beforeDir="false" afterPath="$PROJECT_DIR$/quariadne/circuit.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/quariadne/converters.py" beforeDir="false" afterPath="$PROJECT_DIR$/quariadne/converters.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/uv.lock" beforeDir="false" afterPath="$PROJECT_DIR$/uv.lock" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -89,7 +86,8 @@
       <workItem from="1749149356792" duration="2071000" />
       <workItem from="1749297069445" duration="1916000" />
       <workItem from="1749309237707" duration="1315000" />
-      <workItem from="1749324402289" duration="707000" />
+      <workItem from="1749324402289" duration="11521000" />
+      <workItem from="1749409014167" duration="2766000" />
     </task>
     <task id="LOCAL-00001" summary="initial steup probelms fixed, and this is obviously somethign like an iintila commit">
       <option name="closed" value="true" />
@@ -131,7 +129,15 @@
       <option name="project" value="LOCAL" />
       <updated>1749297807856</updated>
     </task>
-    <option name="localTasksCounter" value="6" />
+    <task id="LOCAL-00006" summary="added documentation  generation to the module">
+      <option name="closed" value="true" />
+      <created>1749325212350</created>
+      <option name="number" value="00006" />
+      <option name="presentableId" value="LOCAL-00006" />
+      <option name="project" value="LOCAL" />
+      <updated>1749325212350</updated>
+    </task>
+    <option name="localTasksCounter" value="7" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -144,6 +150,7 @@
     <MESSAGE value="added transition related scripts" />
     <MESSAGE value="small changes for the jupyter purposes" />
     <MESSAGE value="added circuit representing class&#10;added the circuit converter from qiskit dag" />
-    <option name="LAST_COMMIT_MESSAGE" value="added circuit representing class&#10;added the circuit converter from qiskit dag" />
+    <MESSAGE value="added documentation  generation to the module" />
+    <option name="LAST_COMMIT_MESSAGE" value="added documentation  generation to the module" />
   </component>
 </project>
