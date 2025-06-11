@@ -4,10 +4,21 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="72376229-81b2-4aab-affa-e69c21520671" name="Changes" comment="added documentation  generation to the module">
+    <list default="true" id="72376229-81b2-4aab-affa-e69c21520671" name="Changes" comment="added visulaisation module to the routing circuit">
+      <change beforePath="$PROJECT_DIR$/.idea/quariadne.iml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/quariadne.iml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.pre-commit-config.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/.pre-commit-config.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/docs/Makefile" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/docs/conf.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/docs/index.rst" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/docs/make.bat" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/docs/modules.rst" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/docs/quariadne.rst" beforeDir="false" />
       <change beforePath="$PROJECT_DIR$/notebook/MILP.ipynb" beforeDir="false" afterPath="$PROJECT_DIR$/notebook/MILP.ipynb" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/pyproject.toml" beforeDir="false" afterPath="$PROJECT_DIR$/pyproject.toml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/quariadne/circuit.py" beforeDir="false" afterPath="$PROJECT_DIR$/quariadne/circuit.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/quariadne/converters.py" beforeDir="false" afterPath="$PROJECT_DIR$/quariadne/converters.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/uv.lock" beforeDir="false" afterPath="$PROJECT_DIR$/uv.lock" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -49,11 +60,21 @@
     &quot;node.js.selected.package.eslint&quot;: &quot;(autodetect)&quot;,
     &quot;node.js.selected.package.tslint&quot;: &quot;(autodetect)&quot;,
     &quot;nodejs_package_manager_path&quot;: &quot;npm&quot;,
-    &quot;settings.editor.selected.configurable&quot;: &quot;preferences.pluginManager&quot;,
+    &quot;settings.editor.selected.configurable&quot;: &quot;editor.preferences.completion&quot;,
     &quot;vue.rearranger.settings.migration&quot;: &quot;true&quot;
   }
 }</component>
   <component name="RunManager">
+    <configuration default="true" type="lua.app" factoryName="Lua Application">
+      <option name="program" value="/usr/bin/lua" />
+      <option name="file" value="" />
+      <option name="workingDir" value="127.0.0.1:8889" />
+      <option name="debuggerType" value="2" />
+      <option name="params" value="" />
+      <option name="charset" value="UTF-8" />
+      <option name="showConsole" value="true" />
+      <method v="2" />
+    </configuration>
     <configuration default="true" type="lua.app" factoryName="Lua Application">
       <option name="program" value="/usr/bin/lua" />
       <option name="file" value="" />
@@ -87,7 +108,12 @@
       <workItem from="1749297069445" duration="1916000" />
       <workItem from="1749309237707" duration="1315000" />
       <workItem from="1749324402289" duration="11521000" />
-      <workItem from="1749409014167" duration="2766000" />
+      <workItem from="1749409014167" duration="3116000" />
+      <workItem from="1749488087173" duration="1746000" />
+      <workItem from="1749554100711" duration="1282000" />
+      <workItem from="1749566042183" duration="1179000" />
+      <workItem from="1749642198977" duration="1398000" />
+      <workItem from="1749655369323" duration="878000" />
     </task>
     <task id="LOCAL-00001" summary="initial steup probelms fixed, and this is obviously somethign like an iintila commit">
       <option name="closed" value="true" />
@@ -137,7 +163,15 @@
       <option name="project" value="LOCAL" />
       <updated>1749325212350</updated>
     </task>
-    <option name="localTasksCounter" value="7" />
+    <task id="LOCAL-00007" summary="added visulaisation module to the routing circuit">
+      <option name="closed" value="true" />
+      <created>1749466935140</created>
+      <option name="number" value="00007" />
+      <option name="presentableId" value="LOCAL-00007" />
+      <option name="project" value="LOCAL" />
+      <updated>1749466935141</updated>
+    </task>
+    <option name="localTasksCounter" value="8" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -151,6 +185,7 @@
     <MESSAGE value="small changes for the jupyter purposes" />
     <MESSAGE value="added circuit representing class&#10;added the circuit converter from qiskit dag" />
     <MESSAGE value="added documentation  generation to the module" />
-    <option name="LAST_COMMIT_MESSAGE" value="added documentation  generation to the module" />
+    <MESSAGE value="added visulaisation module to the routing circuit" />
+    <option name="LAST_COMMIT_MESSAGE" value="added visulaisation module to the routing circuit" />
   </component>
 </project>

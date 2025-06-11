@@ -105,8 +105,11 @@ class Transition:
 
 @dataclasses.dataclass
 class RoutingCircuit:
-    """
-    This class represents a circuit abstraction, containing only relevant objects for routing
+    """This class represents a circuit abstraction, containing only relevant objects for routing
+
+    Args:
+        nodes: list of computational nodes in the circuit
+        transitions: list of state transitions in the circuit between the nodes
 
 
     """
@@ -115,14 +118,16 @@ class RoutingCircuit:
     transitions: typing.List[Transition]
 
     def to_nx(self):
-        """
-        Converts the routing circuit into a directed graph in the NetworkX format.
+        """Converts the routing circuit into a directed graph in the NetworkX format.
 
         This method provides functionality to represent the graph in the NetworkX
         multiple directed graph format for interoperability with other libraries.
 
-        :return nx_multidigraph: Routing circuit as DAG in the NetworkX format.
-        :rtype nx.MultiDiGraph:
+        Returns:
+            nx.MultiDiGraph: Routing circuit as DAG in the NetworkX format.
+
+        Raises:
+            TypeError: if the provided underlying graph is not a DAG.
         """
 
         # creating a stub graph and filling it with the computational nodes
@@ -143,9 +148,7 @@ class RoutingCircuit:
 
     @staticmethod
     def _generate_topological_layout(routing_dag: nx.MultiDiGraph):
-        """
-        This function gets a DAG and then generates a topological layout for it.
-        """
+        """This function gets a DAG and then generates a topological layout for it."""
 
         # first we generate a layer spread by topological sorting
         for layer, nodes in enumerate(nx.topological_generations(routing_dag)):
@@ -157,10 +160,10 @@ class RoutingCircuit:
         return multipartite_layout
 
     def _generate_edge_labels_map(self):
-        """
-        This function generates a mapper for edges plotting (networkx style)
-        :return label_by_edge: a map of nx edge to edge label
-        :rtype: dict
+        """This function generates a mapper for edges plotting (networkx style)
+
+        Returns:
+            dict: a map of nx edge to edge label string
         """
         label_by_edge = {}
         for transition in self.transitions:
@@ -171,18 +174,14 @@ class RoutingCircuit:
         return label_by_edge
 
     def _generate_node_labels_map(self):
-        """
-        This function generates a mapper for nodes plotting (networkx style).
-        """
+        """This function generates a mapper for nodes plotting (networkx style)."""
         label_by_node = {}
         for node in self.nodes:
             label_by_node[node] = node.label
         return label_by_node
 
     def plot_dag(self):
-        """
-        This function visualises the DAG corresponding to the routed circuit
-        """
+        """This function visualises the DAG corresponding to the routed circuit"""
 
         # generating helper topology, and label mappers
         routing_dag = self.to_nx()
