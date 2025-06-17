@@ -1,6 +1,8 @@
 import dataclasses
 import typing
 
+import qiskit
+
 
 @dataclasses.dataclass(frozen=True)
 class PhysicalQubit:
@@ -14,6 +16,39 @@ class LogicalQubit:
     """This class represents physical qubit, which is present in the coupling schemes."""
 
     index: int
+
+    @classmethod
+    def from_qiskit_wire(cls, qiskit_wire: qiskit.circuit.Qubit) -> typing.Self:
+        """This function takes a qiskit circuit qubit, and converts it to corresponding
+        logical qubit.
+
+        Args:
+            qiskit_wire: a qiskit circuit wire
+
+        Returns:
+            logical qubit
+        """
+        qiskit_wire_index = qiskit_wire._index
+        logical_qubit = cls(qiskit_wire_index)
+        return logical_qubit
+
+    @classmethod
+    def from_qiskit_wires(
+        cls, qiskit_wires: typing.List[qiskit.circuit.Qubit]
+    ) -> typing.Tuple[typing.Self, ...]:
+        """This function takes a set of qiskit wires, and converts it to corresponding
+        logical qubit iterable.
+
+        Args:
+            qiskit_wires: a qiskit circuit wire
+
+        Returns:
+            logical qubits tuple
+        """
+        logical_qubits = tuple(
+            cls.from_qiskit_wire(qiskit_wire) for qiskit_wire in qiskit_wires
+        )
+        return logical_qubits
 
 
 @dataclasses.dataclass(frozen=True)
@@ -29,6 +64,31 @@ class QuantumOperation:
     name: str
     qubits_participating: typing.Tuple[LogicalQubit, ...]
 
+    @classmethod
+    def from_qiskit_instruction(
+        cls, qiskit_instruction: qiskit.circuit.CircuitInstruction
+    ):
+        """This function gets a qiskit instruction, and returns an inner QuantumOperation object.
+
+        Args:
+            qiskit_instruction: a qiskit instruction, which defines the quantum operation.
+
+        Returns:
+            the corresponding quantum operation
+        """
+
+        # decomposing qiskit instrutciton
+        instruction_operation, instruction_qubits = (
+            qiskit_instruction.operation,
+            qiskit_instruction.qubits,
+        )
+        quantum_operation_name = instruction_operation.name
+        quantum_operation_qubits = LogicalQubit.from_qiskit_wires(instruction_qubits)
+        quantum_operation = QuantumOperation(
+            quantum_operation_name, quantum_operation_qubits
+        )
+        return quantum_operation
+
 
 @dataclasses.dataclass()
 class AbstractQuantumCircuit:
@@ -42,4 +102,33 @@ class AbstractQuantumCircuit:
     """
 
     operations: typing.List[QuantumOperation]
-    qubits: typing.List[LogicalQubit]
+    qubits: typing.Tuple[LogicalQubit, ...]
+
+    @classmethod
+    def from_qiskit_circuit(cls, qiskit_circuit: qiskit.QuantumCircuit) -> typing.Self:
+        """This function generates an abstract quantum circuit from a qiskit circuit
+
+        Args:
+            qiskit_circuit: a quantum circuit qiskit object, which we want to convert
+
+        Returns:
+            an abstract quantum circuit object, equivalent to qiskit one
+        """
+        computational_qubits = LogicalQubit.from_qiskit_wires(qiskit_circuit.qubits)
+        operations = []
+        for instruction in qiskit_circuit.data:
+            instruction_operation, instruction_qubits = (
+                instruction.operation,
+                instruction.qubits,
+            )
+            quantum_operation_name = instruction_operation.name
+            quantum_operation_qubits = LogicalQubit.from_qiskit_wires(
+                instruction_qubits
+            )
+            quantum_operation = QuantumOperation(
+                quantum_operation_name, quantum_operation_qubits
+            )
+            operations.append(quantum_operation)
+
+        corresponding_abstract_circuit = cls(operations, computational_qubits)
+        return corresponding_abstract_circuit

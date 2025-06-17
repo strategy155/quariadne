@@ -4,13 +4,11 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="72376229-81b2-4aab-affa-e69c21520671" name="Changes" comment="added visulaisation module to the routing circuit">
-      <change afterPath="$PROJECT_DIR$/quariadne/computational_graph.py" afterDir="false" />
+    <list default="true" id="72376229-81b2-4aab-affa-e69c21520671" name="Changes" comment="This is a major refactoring step, decoupling the converter logic and moving it into the related DAG function. Many changes in the names and API broken.">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/main.py" beforeDir="false" />
       <change beforePath="$PROJECT_DIR$/notebook/MILP.ipynb" beforeDir="false" afterPath="$PROJECT_DIR$/notebook/MILP.ipynb" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/quariadne/circuit.py" beforeDir="false" afterPath="$PROJECT_DIR$/quariadne/circuit.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/quariadne/converters.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/quariadne/computational_graph.py" beforeDir="false" afterPath="$PROJECT_DIR$/quariadne/computational_graph.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -121,7 +119,9 @@
       <workItem from="1749833764732" duration="1230000" />
       <workItem from="1749896147582" duration="1739000" />
       <workItem from="1749910210149" duration="78000" />
-      <workItem from="1749916310920" duration="1167000" />
+      <workItem from="1749916310920" duration="1306000" />
+      <workItem from="1749995300206" duration="1194000" />
+      <workItem from="1750171633052" duration="1213000" />
     </task>
     <task id="LOCAL-00001" summary="initial steup probelms fixed, and this is obviously somethign like an iintila commit">
       <option name="closed" value="true" />
@@ -194,6 +194,8 @@
     <MESSAGE value="added circuit representing class&#10;added the circuit converter from qiskit dag" />
     <MESSAGE value="added documentation  generation to the module" />
     <MESSAGE value="added visulaisation module to the routing circuit" />
-    <option name="LAST_COMMIT_MESSAGE" value="added visulaisation module to the routing circuit" />
+    <MESSAGE value="Massive " />
+    <MESSAGE value="This is a major refactoring step, decoupling the converter logic and moving it into the related DAG function. Many changes in the names and API broken." />
+    <option name="LAST_COMMIT_MESSAGE" value="This is a major refactoring step, decoupling the converter logic and moving it into the related DAG function. Many changes in the names and API broken." />
   </component>
 </project>

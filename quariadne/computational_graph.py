@@ -235,7 +235,7 @@ class ComputationalDAG:
 
         # forming a resulting routing representation
 
-        routing_circuit = ComputationalDAG(circuit_nodes, circuit_transitions)
+        routing_circuit = cls(circuit_nodes, circuit_transitions)
 
         return routing_circuit
 
