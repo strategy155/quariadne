@@ -114,17 +114,26 @@ class AbstractQuantumCircuit:
         Returns:
             an abstract quantum circuit object, equivalent to qiskit one
         """
+
+        # first we extract the list of logical qubits in the circuit
         computational_qubits = LogicalQubit.from_qiskit_wires(qiskit_circuit.qubits)
         operations = []
+
+        # heret then we one by one extract the topologically sorted operations in the circuit
         for instruction in qiskit_circuit.data:
+            # deconstructing the qiskit instruction
             instruction_operation, instruction_qubits = (
                 instruction.operation,
                 instruction.qubits,
             )
             quantum_operation_name = instruction_operation.name
+
+            # creating the list of logical qubits
             quantum_operation_qubits = LogicalQubit.from_qiskit_wires(
                 instruction_qubits
             )
+
+            # constructing the corresponding operation
             quantum_operation = QuantumOperation(
                 quantum_operation_name, quantum_operation_qubits
             )
