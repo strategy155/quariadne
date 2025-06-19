@@ -4,10 +4,9 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="72376229-81b2-4aab-affa-e69c21520671" name="Changes" comment="This is a major refactoring step, decoupling the converter logic and moving it into the related DAG function. Many changes in the names and API broken.">
+    <list default="true" id="72376229-81b2-4aab-affa-e69c21520671" name="Changes" comment="moving towards the implementation of the ILP">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/notebook/MILP.ipynb" beforeDir="false" afterPath="$PROJECT_DIR$/notebook/MILP.ipynb" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/quariadne/circuit.py" beforeDir="false" afterPath="$PROJECT_DIR$/quariadne/circuit.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -121,7 +120,8 @@
       <workItem from="1749916310920" duration="1306000" />
       <workItem from="1749995300206" duration="1194000" />
       <workItem from="1750171633052" duration="3221000" />
-      <workItem from="1750253836504" duration="968000" />
+      <workItem from="1750253836504" duration="1268000" />
+      <workItem from="1750338422613" duration="473000" />
     </task>
     <task id="LOCAL-00001" summary="initial steup probelms fixed, and this is obviously somethign like an iintila commit">
       <option name="closed" value="true" />
@@ -179,7 +179,15 @@
       <option name="project" value="LOCAL" />
       <updated>1749466935141</updated>
     </task>
-    <option name="localTasksCounter" value="8" />
+    <task id="LOCAL-00008" summary="moving towards the implementation of the ILP">
+      <option name="closed" value="true" />
+      <created>1750255137642</created>
+      <option name="number" value="00008" />
+      <option name="presentableId" value="LOCAL-00008" />
+      <option name="project" value="LOCAL" />
+      <updated>1750255137642</updated>
+    </task>
+    <option name="localTasksCounter" value="9" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -196,6 +204,7 @@
     <MESSAGE value="added visulaisation module to the routing circuit" />
     <MESSAGE value="Massive " />
     <MESSAGE value="This is a major refactoring step, decoupling the converter logic and moving it into the related DAG function. Many changes in the names and API broken." />
-    <option name="LAST_COMMIT_MESSAGE" value="This is a major refactoring step, decoupling the converter logic and moving it into the related DAG function. Many changes in the names and API broken." />
+    <MESSAGE value="moving towards the implementation of the ILP" />
+    <option name="LAST_COMMIT_MESSAGE" value="moving towards the implementation of the ILP" />
   </component>
 </project>
