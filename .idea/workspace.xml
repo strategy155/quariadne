@@ -4,9 +4,8 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="72376229-81b2-4aab-affa-e69c21520671" name="Changes" comment="moving towards the implementation of the ILP">
+    <list default="true" id="72376229-81b2-4aab-affa-e69c21520671" name="Changes" comment="Added the initial ILP interfaces for the timestep-based qubit mapping control.">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/notebook/MILP.ipynb" beforeDir="false" afterPath="$PROJECT_DIR$/notebook/MILP.ipynb" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -121,7 +120,7 @@
       <workItem from="1749995300206" duration="1194000" />
       <workItem from="1750171633052" duration="3221000" />
       <workItem from="1750253836504" duration="1268000" />
-      <workItem from="1750338422613" duration="473000" />
+      <workItem from="1750338422613" duration="1408000" />
     </task>
     <task id="LOCAL-00001" summary="initial steup probelms fixed, and this is obviously somethign like an iintila commit">
       <option name="closed" value="true" />
@@ -187,7 +186,15 @@
       <option name="project" value="LOCAL" />
       <updated>1750255137642</updated>
     </task>
-    <option name="localTasksCounter" value="9" />
+    <task id="LOCAL-00009" summary="Added the initial ILP interfaces for the timestep-based qubit mapping control.">
+      <option name="closed" value="true" />
+      <created>1750340095701</created>
+      <option name="number" value="00009" />
+      <option name="presentableId" value="LOCAL-00009" />
+      <option name="project" value="LOCAL" />
+      <updated>1750340095701</updated>
+    </task>
+    <option name="localTasksCounter" value="10" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -205,6 +212,7 @@
     <MESSAGE value="Massive " />
     <MESSAGE value="This is a major refactoring step, decoupling the converter logic and moving it into the related DAG function. Many changes in the names and API broken." />
     <MESSAGE value="moving towards the implementation of the ILP" />
-    <option name="LAST_COMMIT_MESSAGE" value="moving towards the implementation of the ILP" />
+    <MESSAGE value="Added the initial ILP interfaces for the timestep-based qubit mapping control." />
+    <option name="LAST_COMMIT_MESSAGE" value="Added the initial ILP interfaces for the timestep-based qubit mapping control." />
   </component>
 </project>
