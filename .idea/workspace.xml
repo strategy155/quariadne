@@ -4,11 +4,12 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="72376229-81b2-4aab-affa-e69c21520671" name="Changes" comment="Added the timestep control for the swap operations">
-      <change afterPath="$PROJECT_DIR$/quariadne/milp_router.py" afterDir="false" />
+    <list default="true" id="72376229-81b2-4aab-affa-e69c21520671" name="Changes" comment="In the middle of transferrring of the MILP ipynb experiments to the stabilised API. WIP">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/CLAUDE.md" beforeDir="false" afterPath="$PROJECT_DIR$/CLAUDE.md" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/notebook/MILP.ipynb" beforeDir="false" afterPath="$PROJECT_DIR$/notebook/MILP.ipynb" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/pyproject.toml" beforeDir="false" afterPath="$PROJECT_DIR$/pyproject.toml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/quariadne/milp_router.py" beforeDir="false" afterPath="$PROJECT_DIR$/quariadne/milp_router.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/uv.lock" beforeDir="false" afterPath="$PROJECT_DIR$/uv.lock" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
@@ -160,7 +161,14 @@
       <workItem from="1754397997679" duration="3712000" />
       <workItem from="1754469567617" duration="3398000" />
       <workItem from="1754483022626" duration="8687000" />
-      <workItem from="1754639436822" duration="868000" />
+      <workItem from="1754639436822" duration="1323000" />
+      <workItem from="1754646783301" duration="614000" />
+      <workItem from="1754729853528" duration="3346000" />
+      <workItem from="1754811542397" duration="15006000" />
+      <workItem from="1755073114276" duration="1777000" />
+      <workItem from="1755095573704" duration="1421000" />
+      <workItem from="1755104031600" duration="2871000" />
+      <workItem from="1755177324206" duration="622000" />
     </task>
     <task id="LOCAL-00001" summary="initial steup probelms fixed, and this is obviously somethign like an iintila commit">
       <option name="closed" value="true" />
@@ -242,7 +250,15 @@
       <option name="project" value="LOCAL" />
       <updated>1750429126884</updated>
     </task>
-    <option name="localTasksCounter" value="11" />
+    <task id="LOCAL-00011" summary="Started using claude and added the diagnostic and documentation files.">
+      <option name="closed" value="true" />
+      <created>1754640504785</created>
+      <option name="number" value="00011" />
+      <option name="presentableId" value="LOCAL-00011" />
+      <option name="project" value="LOCAL" />
+      <updated>1754640504785</updated>
+    </task>
+    <option name="localTasksCounter" value="12" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -262,6 +278,8 @@
     <MESSAGE value="moving towards the implementation of the ILP" />
     <MESSAGE value="Added the initial ILP interfaces for the timestep-based qubit mapping control." />
     <MESSAGE value="Added the timestep control for the swap operations" />
-    <option name="LAST_COMMIT_MESSAGE" value="Added the timestep control for the swap operations" />
+    <MESSAGE value="Started using claude and added the diagnostic and documentation files." />
+    <MESSAGE value="In the middle of transferrring of the MILP ipynb experiments to the stabilised API. WIP" />
+    <option name="LAST_COMMIT_MESSAGE" value="In the middle of transferrring of the MILP ipynb experiments to the stabilised API. WIP" />
   </component>
 </project>

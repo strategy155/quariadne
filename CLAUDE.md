@@ -98,12 +98,6 @@ The `MilpRouter` class implements Mixed-Integer Linear Programming for quantum c
 ### Variable Indexing
 - Variables are flattened: [mapping_vars, gate_execution_vars, movement_vars]
 - Padding offsets ensure correct indexing across variable types
-- Pre-calculated flat shapes: `flat_mapping_variables_shape`, `flat_gate_execution_variables_shape`, `flat_qubit_movement_shape`
-
-### Implemented Constraint Generators
-- `generate_logical_uniqueness_constraint()`: Each logical qubit maps to exactly one physical qubit per timestep
-- `generate_physical_uniqueness_constraint()`: Each physical qubit hosts exactly one logical qubit per timestep  
-- `generate_gate_execution_constraint()`: Each gate executes on exactly one physical edge at its assigned timestep
 
 ## Note for Claude Code 
 
