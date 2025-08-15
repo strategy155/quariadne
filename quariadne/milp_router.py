@@ -1,6 +1,7 @@
 import networkx as nx
 import numpy as np
 from dataclasses import dataclass
+from enum import Enum
 
 import quariadne.circuit
 import scipy.optimize
@@ -31,12 +32,16 @@ MINUS_ONE_LOWER_BOUND = -1
 # Variable bound constants
 BINARY_VARIABLE_LOWER_BOUND = 0
 BINARY_VARIABLE_UPPER_BOUND = 1
-BINARY_VARIABLE_INTEGRALITY = 1
+INTEGER_VARIABLE_INTEGRALITY = 1
 
-# Variable type constants
-MAPPING_VARIABLES = "mapping"
-GATE_EXECUTION_VARIABLES = "gate_execution"
-QUBIT_MOVEMENT_VARIABLES = "qubit_movement"
+
+class RoutingVariableType(Enum):
+    """Enum for variable types in MILP optimization."""
+
+    MAPPING = "mapping"
+    GATE_EXECUTION = "gate_execution"
+    QUBIT_MOVEMENT = "qubit_movement"
+
 
 # Variable registry field constants
 VARIABLE_SHAPE = "shape"
@@ -61,8 +66,38 @@ class MilpRouterResult:
 
 
 class MilpRouter:
+    """Mixed-Integer Linear Programming router for quantum circuit qubit routing.
+
+    Implements a MILP-based approach to solve the quantum circuit routing problem,
+    where logical qubits must be mapped to physical qubits while respecting hardware
+    coupling constraints. The router uses scipy.optimize.milp to find optimal
+    qubit mappings and SWAP operations.
+
+    The MILP formulation includes three types of decision variables:
+    - Mapping variables: qubit-to-physical mapping at each timestep
+    - Gate execution variables: which gates execute on which physical edges
+    - Qubit movement variables: qubit movement between physical locations
+
+    Attributes:
+        coupling_map: NetworkX DiGraph representing hardware connectivity
+        routed_circuit: Abstract quantum circuit to be routed
+        qubit_count: Number of physical qubits available
+        operations: List of two-qubit operations to be routed
+        operation_count: Number of operations to route
+        worst_spacing: Worst-case timesteps for token swapping
+        spaced_timesteps_count: Total timesteps in routing schedule
+    """
+
     def _add_dummy_qubits(self):
-        # we check the compatibility with the given hardware, and deal with it accordingly
+        """Add dummy logical qubits to match hardware qubit count.
+
+        Ensures the circuit has the same number of logical qubits as physical qubits
+        available on the hardware. This is required for the MILP formulation to work
+        correctly as it assumes a bijective mapping between logical and physical qubits.
+
+        Raises:
+            TypeError: If the circuit has more logical qubits than available physical qubits.
+        """
         routed_circuit_qubit_count = len(self.routed_circuit.qubits)
         if routed_circuit_qubit_count < self.coupling_map.number_of_nodes():
             dummy_logical_qubits = tuple(
@@ -77,8 +112,19 @@ class MilpRouter:
             raise TypeError("We got more qubits than we can route!")
 
     def _get_two_qubit_operations(self):
+        """Extract two-qubit operations from the quantum circuit.
+
+        Filters the circuit operations to include only two-qubit gates, which are the
+        ones that require routing due to coupling map constraints. Single-qubit operations
+        can be executed on any physical qubit without routing considerations.
+
+        Returns:
+            List of QuantumOperation objects that involve exactly two qubits.
+
+        Raises:
+            TypeError: If any operation involves more than two qubits.
+        """
         two_qubit_gate_operations = []
-        # first we get rid of single qubit gate operations
         for operation in self.routed_circuit.operations:
             if len(operation.qubits_participating) == 2:
                 two_qubit_gate_operations.append(operation)
@@ -92,6 +138,19 @@ class MilpRouter:
         coupling_map: nx.DiGraph,
         quantum_circuit: quariadne.circuit.AbstractQuantumCircuit,
     ):
+        """Initialize the MILP router with hardware topology and quantum circuit.
+
+        Sets up all necessary data structures for the MILP formulation including:
+        - Variable shapes and offsets for mapping, gate execution, and qubit movement
+        - Constraint generation registry with bounds
+        - Timestep calculations based on worst-case token swapping
+
+        Args:
+            coupling_map: NetworkX DiGraph representing the physical qubit connectivity
+                         and allowed two-qubit gate operations on the hardware.
+            quantum_circuit: Abstract quantum circuit representation containing logical
+                           qubits and operations to be routed onto the hardware.
+        """
         self.coupling_map = coupling_map
         self.qubit_count = coupling_map.number_of_nodes()
         self.routed_circuit = quantum_circuit
@@ -151,17 +210,17 @@ class MilpRouter:
 
         # Variable type registry with shapes, flat shapes, and offsets
         self.variable_types = {
-            MAPPING_VARIABLES: {
+            RoutingVariableType.MAPPING: {
                 VARIABLE_SHAPE: self.mapping_variables_shape,
                 VARIABLE_FLAT_SHAPE: self.flat_mapping_variables_shape,
                 VARIABLE_OFFSET: self.mapping_variables_offset,
             },
-            GATE_EXECUTION_VARIABLES: {
+            RoutingVariableType.GATE_EXECUTION: {
                 VARIABLE_SHAPE: self.gate_execution_variables_shape,
                 VARIABLE_FLAT_SHAPE: self.flat_gate_execution_variables_shape,
                 VARIABLE_OFFSET: self.gate_execution_variables_offset,
             },
-            QUBIT_MOVEMENT_VARIABLES: {
+            RoutingVariableType.QUBIT_MOVEMENT: {
                 VARIABLE_SHAPE: self.qubit_movement_shape,
                 VARIABLE_FLAT_SHAPE: self.flat_qubit_movement_shape,
                 VARIABLE_OFFSET: self.qubit_movement_variables_offset,
@@ -210,14 +269,11 @@ class MilpRouter:
     def _initialize_coefficient_matrix(self) -> np.ndarray:
         """Initialize a coefficient matrix stub for MILP constraint construction.
 
-        In MILP formulation, this creates the zero matrix that will be populated with
-        constraint coefficients. See scipy.optimize.milp documentation.
-
-        Args:
-            constraint_count: Number of constraints (rows) in the coefficient matrix.
+        In MILP formulation, this creates the zero vector that will be populated with
+        constraint coefficients for a single constraint row.
 
         Returns:
-            Zero coefficient matrix with shape (constraint_count, full_decision_variables_shape).
+            Zero coefficient vector with shape (full_decision_variables_shape,).
         """
         coefficient_matrix_shape = self.full_decision_variables_shape
         coefficient_matrix = np.zeros(coefficient_matrix_shape)
@@ -886,7 +942,7 @@ class MilpRouter:
 
         # Set integrality constraints: all variables are integer (binary)
         integrality_constraints = np.full(
-            self.full_decision_variables_shape, BINARY_VARIABLE_INTEGRALITY
+            self.full_decision_variables_shape, INTEGER_VARIABLE_INTEGRALITY
         )
 
         # Solve the MILP problem
@@ -904,13 +960,15 @@ class MilpRouter:
         return milp_result
 
     def _reconstruct_variables(
-        self, milp_result: scipy.optimize.OptimizeResult, variable_type: str
+        self,
+        milp_result: scipy.optimize.OptimizeResult,
+        variable_type: RoutingVariableType,
     ) -> np.ndarray:
         """Generic function to reconstruct variables from MILP solution using registry.
 
         Args:
             milp_result: The scipy MILP optimization result containing the solution vector.
-            variable_type: Type of variables to reconstruct (use constants).
+            variable_type: Type of variables to reconstruct using RoutingVariableType enum.
 
         Returns:
             Array with the specified shape containing reconstructed variables.
@@ -945,12 +1003,14 @@ class MilpRouter:
         milp_result = self._run_milp()
 
         # Reconstruct all variable matrices using generic function with registry
-        mapping_variables = self._reconstruct_variables(milp_result, MAPPING_VARIABLES)
+        mapping_variables = self._reconstruct_variables(
+            milp_result, RoutingVariableType.MAPPING
+        )
         gate_execution_variables = self._reconstruct_variables(
-            milp_result, GATE_EXECUTION_VARIABLES
+            milp_result, RoutingVariableType.GATE_EXECUTION
         )
         qubit_movement_variables = self._reconstruct_variables(
-            milp_result, QUBIT_MOVEMENT_VARIABLES
+            milp_result, RoutingVariableType.QUBIT_MOVEMENT
         )
 
         # Return the complete result
