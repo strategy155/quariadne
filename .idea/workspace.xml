@@ -4,10 +4,16 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="72376229-81b2-4aab-affa-e69c21520671" name="Changes" comment="Added new MILP notebook for reconstruction. &#10;&#10;Moved all the developments to the class-encapsulator. &#10;&#10;Created a reconstruction set of routines. &#10;&#10;Added packages for the drawing capabilitise of the qiskit transpilers. &#10;&#10;WIP&#10;&#10;Working with the CC.">
+    <list default="true" id="72376229-81b2-4aab-affa-e69c21520671" name="Changes" comment="Added the MILP router module for qiskit">
+      <change afterPath="$PROJECT_DIR$/quariadne/qiskit_passes.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/notebook/MILP reconstruction.ipynb" beforeDir="false" afterPath="$PROJECT_DIR$/notebook/MILP reconstruction.ipynb" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/notebook/MILP.ipynb" beforeDir="false" afterPath="$PROJECT_DIR$/notebook/MILP.ipynb" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/pyproject.toml" beforeDir="false" afterPath="$PROJECT_DIR$/pyproject.toml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/quariadne/circuit.py" beforeDir="false" afterPath="$PROJECT_DIR$/quariadne/circuit.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/quariadne/computational_graph.py" beforeDir="false" afterPath="$PROJECT_DIR$/quariadne/computational_graph.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/quariadne/milp_router.py" beforeDir="false" afterPath="$PROJECT_DIR$/quariadne/milp_router.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/uv.lock" beforeDir="false" afterPath="$PROJECT_DIR$/uv.lock" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -166,7 +172,33 @@
       <workItem from="1755095573704" duration="1421000" />
       <workItem from="1755104031600" duration="2871000" />
       <workItem from="1755177324206" duration="1389000" />
-      <workItem from="1755245379923" duration="664000" />
+      <workItem from="1755245379923" duration="1142000" />
+      <workItem from="1755267911645" duration="116000" />
+      <workItem from="1755280138851" duration="967000" />
+      <workItem from="1755325715419" duration="1341000" />
+      <workItem from="1755415903156" duration="1484000" />
+      <workItem from="1755587443329" duration="1097000" />
+      <workItem from="1756389560405" duration="1816000" />
+      <workItem from="1756481018052" duration="3168000" />
+      <workItem from="1756626014463" duration="3581000" />
+      <workItem from="1756805590141" duration="3254000" />
+      <workItem from="1756816500170" duration="614000" />
+      <workItem from="1756842310639" duration="371000" />
+      <workItem from="1756907867718" duration="3068000" />
+      <workItem from="1756997522906" duration="2242000" />
+      <workItem from="1757070500122" duration="1399000" />
+      <workItem from="1757090839118" duration="5636000" />
+      <workItem from="1757171273977" duration="14174000" />
+      <workItem from="1757351782051" duration="2006000" />
+      <workItem from="1757413689878" duration="2257000" />
+      <workItem from="1757431731635" duration="1994000" />
+      <workItem from="1757507805490" duration="1417000" />
+      <workItem from="1757525516003" duration="635000" />
+      <workItem from="1757585445754" duration="1802000" />
+      <workItem from="1757598751706" duration="2465000" />
+      <workItem from="1757667270867" duration="6458000" />
+      <workItem from="1757761290497" duration="1937000" />
+      <workItem from="1757847095783" duration="4598000" />
     </task>
     <task id="LOCAL-00001" summary="initial steup probelms fixed, and this is obviously somethign like an iintila commit">
       <option name="closed" value="true" />
@@ -256,7 +288,15 @@
       <option name="project" value="LOCAL" />
       <updated>1754640504785</updated>
     </task>
-    <option name="localTasksCounter" value="12" />
+    <task id="LOCAL-00012" summary="Working on the documentation improving. &#10;&#10;Finalised the interfaces for the results, for now. &#10;&#10;WIP">
+      <option name="closed" value="true" />
+      <created>1755246503060</created>
+      <option name="number" value="00012" />
+      <option name="presentableId" value="LOCAL-00012" />
+      <option name="project" value="LOCAL" />
+      <updated>1755246503060</updated>
+    </task>
+    <option name="localTasksCounter" value="13" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -278,6 +318,7 @@
     <MESSAGE value="Added the timestep control for the swap operations" />
     <MESSAGE value="Started using claude and added the diagnostic and documentation files." />
     <MESSAGE value="In the middle of transferrring of the MILP ipynb experiments to the stabilised API. WIP" />
-    <option name="LAST_COMMIT_MESSAGE" value="In the middle of transferrring of the MILP ipynb experiments to the stabilised API. WIP" />
+    <MESSAGE value="Working on the documentation improving. &#10;&#10;Finalised the interfaces for the results, for now. &#10;&#10;WIP" />
+    <option name="LAST_COMMIT_MESSAGE" value="Working on the documentation improving. &#10;&#10;Finalised the interfaces for the results, for now. &#10;&#10;WIP" />
   </component>
 </project>

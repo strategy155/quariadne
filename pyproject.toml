@@ -1,6 +1,6 @@
 [project]
 name = "quariadne"
-version = "0.1.0"
+version = "1.0.0"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.13"
@@ -14,6 +14,12 @@ dependencies = [
     "qiskit-ibm-runtime>=0.40.1",
     "ruff>=0.11.12",
 ]
+
+[project.entry-points."qiskit.transpiler.layout"]
+"quariadne_milp" = "quariadne.qiskit_passes:QuariadneMilpLayoutPlugin"
+
+[project.entry-points."qiskit.transpiler.routing"]
+"quariadne_milp" = "quariadne.qiskit_passes:QuariadneMilpRoutingPlugin"
 
 [tool.uv]
 package = true
