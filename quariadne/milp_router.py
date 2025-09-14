@@ -1,12 +1,18 @@
+import copy
+import typing
 import networkx as nx
 import numpy as np
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
+from collections import defaultdict
 
 import quariadne.circuit
 import scipy.optimize
+import scipy.sparse
+import qiskit.transpiler
 
 DEFAULT_SHAPE_TYPE = np.uint32
+DEFAULT_CONSTRAINT_TYPE = np.float64
 
 # Optimisation coefficient constants
 QUBIT_MOVEMENT_PENALTY_COEFFICIENT = 0.5
@@ -34,6 +40,8 @@ BINARY_VARIABLE_LOWER_BOUND = 0
 BINARY_VARIABLE_UPPER_BOUND = 1
 INTEGER_VARIABLE_INTEGRALITY = 1
 
+type VariableShape = tuple[int, ...]
+
 
 class RoutingVariableType(Enum):
     """Enum for variable types in MILP optimization."""
@@ -50,6 +58,38 @@ VARIABLE_OFFSET = "offset"
 
 
 @dataclass
+class ConstraintMatrixSparseData:
+    """Container for sparse constraint matrix data during MILP constraint generation.
+
+    Holds the coefficient data, row indices, and column indices needed to construct
+    sparse constraint coefficient matrices efficiently. Shape is inferred during creation.
+
+    Attributes:
+        data: List of non-zero coefficient values
+        row_indices: List of row indices corresponding to each coefficient
+        col_indices: List of column indices corresponding to each coefficient
+    """
+
+    data: list[float] = field(default_factory=list)
+    row_indices: list[int] = field(default_factory=list)
+    col_indices: list[int] = field(default_factory=list)
+
+    def add_coefficient(
+        self, value: float, row_index: int, col_index: int
+    ) -> None:  # TODO: Fix typing!
+        """Add a coefficient triplet to the sparse matrix data.
+
+        Args:
+            value: Coefficient value to add
+            row_index: Row index for this coefficient
+            col_index: Column index for this coefficient
+        """
+        self.data.append(value)
+        self.row_indices.append(row_index)
+        self.col_indices.append(col_index)
+
+
+@dataclass
 class MilpRouterResult:
     """Result container for MILP router optimization with processed variable matrices.
 
@@ -63,6 +103,137 @@ class MilpRouterResult:
     mapping_variables: np.ndarray
     gate_execution_variables: np.ndarray
     qubit_movement_variables: np.ndarray
+    worst_spacing: int
+
+    @property
+    def initial_mapping(
+        self,
+    ) -> dict[quariadne.circuit.LogicalQubit, quariadne.circuit.PhysicalQubit]:
+        """Calculate initial mapping from mapping variables at timestep 0.
+
+        Extracts the mapping at the first timestep (t=0) and returns a dictionary
+        mapping logical qubits to physical qubits for the initial state.
+
+        Returns:
+            Dictionary mapping LogicalQubit objects to PhysicalQubit objects
+            representing the initial qubit mapping.
+        """
+        # Extract the mapping matrix at timestep 0
+        initial_timestep_mapping = self.mapping_variables[0]
+
+        # Find all non-zero positions (physical_idx, logical_idx) where mapping exists
+        initial_mapping_indices = np.argwhere(initial_timestep_mapping)
+
+        # Convert numpy array to Python list for iteration
+        # tolist() ensures we get Python integers rather than numpy.int64 objects
+        # which are required for the PhysicalQubit and LogicalQubit constructors
+        initial_mapping_indices_list = initial_mapping_indices.tolist()
+
+        # Build the mapping dictionary (logical → physical, matching notebook implementation)
+        mapping_dict = {}
+        for physical_idx, logical_idx in initial_mapping_indices_list:
+            physical_qubit = quariadne.circuit.PhysicalQubit(physical_idx)
+            logical_qubit = quariadne.circuit.LogicalQubit(logical_idx)
+            mapping_dict[logical_qubit] = physical_qubit
+
+        return mapping_dict
+
+    @property
+    def inserted_swaps(self) -> dict[int, list[quariadne.circuit.PhysicalSwap]]:
+        """Extract swap operations from qubit movement variables.
+
+        TODO: Implement this operation e2e, now this is too raw.
+        Analyses the qubit movement variables to identify SWAP operations that occur
+        after each operation timestep. SWAP operations are detected by finding pairs of
+        qubits that exchange positions between physical locations.
+
+        Returns:
+            Dictionary mapping operation indices (0-based) to lists of PhysicalSwap objects.
+            Each swap pair is represented as a PhysicalSwap containing two PhysicalQubit objects.
+
+        Example:
+            {
+                0: [],  # No swaps after operation 0
+                1: [PhysicalSwap(PhysicalQubit(0), PhysicalQubit(1))],  # SWAP between physical qubits 0 and 1 after operation 1
+                2: [PhysicalSwap(PhysicalQubit(2), PhysicalQubit(3)), PhysicalSwap(PhysicalQubit(0), PhysicalQubit(4))]  # Two SWAPs after operation 2
+            }
+        """
+        swap_pairs_by_operation: defaultdict = defaultdict(list)
+
+        # Find all non-zero movement variables where actual movement occurs
+        defined_movements = np.argwhere(self.qubit_movement_variables)
+
+        for movement in defined_movements:
+            timestep, logical_qubit, from_qubit, to_qubit = movement.tolist()
+
+            # Only consider actual movements (not self-assignments)
+            if from_qubit != to_qubit:
+                # Convert timestep to operation index using worst_spacing division
+                # The +1 is an offset accounting for the fact that swaps happen AFTER respective operations
+                operation_index = timestep // self.worst_spacing + 1
+
+                # Create PhysicalSwap with proper qubit objects
+                physical_qubit_from = quariadne.circuit.PhysicalQubit(from_qubit)
+                physical_qubit_to = quariadne.circuit.PhysicalQubit(to_qubit)
+                swap_pair = quariadne.circuit.PhysicalSwap(
+                    physical_qubit_from, physical_qubit_to
+                )
+
+                # Get current operation's swap list
+                current_operation_swaps = swap_pairs_by_operation[operation_index]
+
+                # Add swap pair if not already present (avoids duplicates through PhysicalSwap equality)
+                if swap_pair not in current_operation_swaps:
+                    current_operation_swaps.append(swap_pair)
+
+        return swap_pairs_by_operation
+
+
+def get_coupling_graph(coupling_map: qiskit.transpiler.CouplingMap) -> nx.DiGraph:
+    """Convert IBM coupling map to NetworkX DiGraph coupling map.
+
+    Converts a Qiskit CouplingMap object to a NetworkX DiGraph using
+    Quariadne's PhysicalQubit representation for nodes and edges.
+
+    Args:
+        coupling_map: Qiskit CouplingMap object representing physical qubit
+                     connectivity (e.g., backend.coupling_map)
+
+    Returns:
+        NetworkX DiGraph with PhysicalQubit nodes and edges representing
+        physical qubit connectivity on the hardware backend.
+
+    Example:
+        >>> from qiskit_ibm_runtime.fake_provider import FakeManilaV2
+        >>> backend = FakeManilaV2()
+        >>> coupling_graph = get_coupling_graph(backend.coupling_map)
+        >>> print(coupling_graph.nodes())
+        >>> print(coupling_graph.edges())
+    """
+    coupling_graph_nx: nx.DiGraph[quariadne.circuit.PhysicalQubit] = nx.DiGraph()
+
+    # Extract physical qubits from coupling map
+    coupling_map_qubits = coupling_map.physical_qubits
+    physical_qubits = tuple(
+        quariadne.circuit.PhysicalQubit(coupling_map_qubit)
+        for coupling_map_qubit in coupling_map_qubits
+    )
+
+    # Extract edges from coupling map
+    coupling_map_edgelist = coupling_map.graph.edge_list()
+    physical_qubits_connections = tuple(
+        (
+            quariadne.circuit.PhysicalQubit(coupling_map_from),
+            quariadne.circuit.PhysicalQubit(coupling_map_to),
+        )
+        for coupling_map_from, coupling_map_to in coupling_map_edgelist
+    )
+
+    # Build NetworkX graph
+    coupling_graph_nx.add_nodes_from(physical_qubits)
+    coupling_graph_nx.add_edges_from(physical_qubits_connections)
+
+    return coupling_graph_nx
 
 
 class MilpRouter:
@@ -153,56 +324,60 @@ class MilpRouter:
         """
         self.coupling_map = coupling_map
         self.qubit_count = coupling_map.number_of_nodes()
-        self.routed_circuit = quantum_circuit
+
+        # copy is needed because we will modify the initial circuit several times.
+        self.routed_circuit = copy.deepcopy(quantum_circuit)
+
+        # calculating the parameters of the circuit
+        # worst spacing is the token swapping worst case $n^2$,
+        # the tokens are calculated before dummy qubits addition
+        self.worst_spacing = len(self.routed_circuit.qubits) ** 2
 
         self._add_dummy_qubits()
 
         self.operations = self._get_two_qubit_operations()
         self.operation_count = len(self.operations)
-
-        # calculating the parameters of the circuit
-        # worst spacing is the token swapping worst case $n^2$
-        self.worst_spacing = self.qubit_count**2
         self.spaced_timesteps_count = self.operation_count * self.worst_spacing
 
-        print(self.routed_circuit.qubits)
         # calculating the shapes of the decision variables
-        self.qubit_movement_shape = (
+        self.qubit_movement_shape: VariableShape = (
             self.spaced_timesteps_count,
             self.qubit_count,
             self.qubit_count,
             self.qubit_count,
         )
-        self.mapping_variables_shape = (
+        self.mapping_variables_shape: VariableShape = (
             self.spaced_timesteps_count,
             self.qubit_count,
             self.qubit_count,
         )
-        self.gate_execution_variables_shape = (
+        self.gate_execution_variables_shape: VariableShape = (
             self.spaced_timesteps_count,
             self.operation_count,
             self.coupling_map.number_of_edges(),
         )
 
-        self.flat_qubit_movement_shape = np.prod(
+        self.flat_qubit_movement_shape: np.integer = np.prod(
             self.qubit_movement_shape, dtype=DEFAULT_SHAPE_TYPE
         )
-        self.flat_mapping_variables_shape = np.prod(
+        self.flat_mapping_variables_shape: np.integer = np.prod(
             self.mapping_variables_shape, dtype=DEFAULT_SHAPE_TYPE
         )
-        self.flat_gate_execution_variables_shape = np.prod(
+        self.flat_gate_execution_variables_shape: np.integer = np.prod(
             self.gate_execution_variables_shape, dtype=DEFAULT_SHAPE_TYPE
         )
-        self.full_decision_variables_shape = (
+        self.full_decision_variables_shape: np.integer = (
             self.flat_mapping_variables_shape
             + self.flat_gate_execution_variables_shape
             + self.flat_qubit_movement_shape
         )
 
         # Precalculated variable offsets
-        self.mapping_variables_offset = 0
-        self.gate_execution_variables_offset = self.flat_mapping_variables_shape
-        self.qubit_movement_variables_offset = (
+        self.mapping_variables_offset: np.integer = DEFAULT_SHAPE_TYPE(0)
+        self.gate_execution_variables_offset: np.integer = (
+            self.flat_mapping_variables_shape
+        )
+        self.qubit_movement_variables_offset: np.integer = (
             self.flat_mapping_variables_shape + self.flat_gate_execution_variables_shape
         )
 
@@ -266,17 +441,24 @@ class MilpRouter:
             FLOW_CONDITION_OUT_CONSTRAINT: ZERO_EQUALITY_CONSTRAINT_BOUND,
         }
 
-    def _initialize_coefficient_matrix(self) -> np.ndarray:
-        """Initialize a coefficient matrix stub for MILP constraint construction.
+    # TODO: CHECK THE UPDATES OF THE CSR
+    @typing.no_type_check
+    def _build_sparse_coefficient_matrix(
+        self, sparse_data: ConstraintMatrixSparseData, constraint_count: int
+    ) -> scipy.sparse.csr_array:
+        """Build a sparse coefficient matrix from constraint matrix sparse data.
 
-        In MILP formulation, this creates the zero vector that will be populated with
-        constraint coefficients for a single constraint row.
+        Args:
+            sparse_data: ConstraintMatrixSparseData containing coefficient values and indices
 
         Returns:
-            Zero coefficient vector with shape (full_decision_variables_shape,).
+            Sparse coefficient matrix in CSR format for efficient operations.
         """
-        coefficient_matrix_shape = self.full_decision_variables_shape
-        coefficient_matrix = np.zeros(coefficient_matrix_shape)
+        coefficient_matrix = scipy.sparse.csr_array(
+            (sparse_data.data, (sparse_data.row_indices, sparse_data.col_indices)),
+            shape=(constraint_count, self.full_decision_variables_shape),
+            dtype=DEFAULT_CONSTRAINT_TYPE,
+        )
         return coefficient_matrix
 
     def _generate_logical_uniqueness_constraint(self):
@@ -287,14 +469,15 @@ class MilpRouter:
         Returns:
             Coefficient matrix for logical qubit uniqueness constraints.
         """
-        logical_uniqueness_per_timestep_constraints = []
+        # Create sparse data container with default empty lists
+        logical_uniqueness_sparse_data = ConstraintMatrixSparseData()
+
+        constraint_index = 0
+
         # Iterate through all timesteps in the routing schedule
         for timestep in range(self.spaced_timesteps_count):
             # For each logical qubit, ensure it maps to exactly one physical qubit
             for logical_qubit in self.routed_circuit.qubits:
-                # Create constraint row for this timestep's logical qubit uniqueness
-                logical_uniqueness_coefficients = self._initialize_coefficient_matrix()
-
                 for physical_qubit in self.coupling_map.nodes:
                     # Build multidimensional index for mapping variable
                     logical_by_physical_index = (
@@ -306,17 +489,18 @@ class MilpRouter:
                     flattened_logical_by_physical_index = np.ravel_multi_index(
                         logical_by_physical_index, self.mapping_variables_shape
                     )
-                    # Set coefficient to 1 for this mapping variable
-                    logical_uniqueness_coefficients[
-                        flattened_logical_by_physical_index
-                    ] = 1
-                logical_uniqueness_per_timestep_constraints.append(
-                    logical_uniqueness_coefficients
-                )
+                    # Add coefficient of 1 for this mapping variable
+                    logical_uniqueness_sparse_data.add_coefficient(
+                        1.0, constraint_index, flattened_logical_by_physical_index
+                    )
 
-        # Combine all timestep constraints into single matrix
-        logical_uniqueness_constraint = np.stack(
-            logical_uniqueness_per_timestep_constraints
+                # Move to next constraint row after processing all physical qubits for this logical qubit
+                constraint_index += 1
+
+        # Build sparse coefficient matrix
+        # Total constraints = final constraint_index (number of constraints processed)
+        logical_uniqueness_constraint = self._build_sparse_coefficient_matrix(
+            logical_uniqueness_sparse_data, constraint_index
         )
         return logical_uniqueness_constraint
 
@@ -328,13 +512,15 @@ class MilpRouter:
         Returns:
             Coefficient matrix for physical qubit uniqueness constraints.
         """
-        physical_uniqueness_per_timestep_constraints = []
+        # Create sparse data container with default empty lists
+        physical_uniqueness_sparse_data = ConstraintMatrixSparseData()
+
+        constraint_index = 0
+
         # Iterate through all timesteps in the routing schedule
         for timestep in range(self.spaced_timesteps_count):
             # For each physical qubit, ensure it hosts exactly one logical qubit
             for physical_qubit in self.coupling_map.nodes:
-                # Create constraint row for this physical qubit's uniqueness
-                physical_uniqueness_coefficients = self._initialize_coefficient_matrix()
                 for logical_qubit in self.routed_circuit.qubits:
                     # Build multidimensional index for mapping variable
                     physical_by_logical_index = (
@@ -346,17 +532,18 @@ class MilpRouter:
                     flattened_physical_by_logical_index = np.ravel_multi_index(
                         physical_by_logical_index, self.mapping_variables_shape
                     )
-                    # Set coefficient to 1 for this mapping variable
-                    physical_uniqueness_coefficients[
-                        flattened_physical_by_logical_index
-                    ] = 1
-                physical_uniqueness_per_timestep_constraints.append(
-                    physical_uniqueness_coefficients
-                )
+                    # Add coefficient of 1 for this mapping variable
+                    physical_uniqueness_sparse_data.add_coefficient(
+                        1.0, constraint_index, flattened_physical_by_logical_index
+                    )
 
-        # Combine all physical qubit constraints into single matrix
-        physical_uniqueness_constraint = np.stack(
-            physical_uniqueness_per_timestep_constraints
+                # Move to next constraint row after processing all logical qubits for this physical qubit
+                constraint_index += 1
+
+        # Build sparse coefficient matrix
+        # Total constraints = final constraint_index (number of constraints processed)
+        physical_uniqueness_constraint = self._build_sparse_coefficient_matrix(
+            physical_uniqueness_sparse_data, constraint_index
         )
         return physical_uniqueness_constraint
 
@@ -368,12 +555,13 @@ class MilpRouter:
         Returns:
             Coefficient matrix for gate execution uniqueness constraints.
         """
-        gate_execution_per_operation_constraints = []
+        # Create sparse data container with default empty lists
+        gate_execution_sparse_data = ConstraintMatrixSparseData()
+
+        constraint_index = 0
 
         # For each operation, ensure it executes on exactly one physical edge
         for operation_index in range(self.operation_count):
-            # Create constraint row for this operation's gate execution uniqueness
-            gate_execution_coefficients = self._initialize_coefficient_matrix()
             # Calculate the timestep when this operation is scheduled to execute
             spaced_timestep = operation_index * self.worst_spacing
 
@@ -393,13 +581,19 @@ class MilpRouter:
                 flattened_gate_execution_index = (
                     self.flat_mapping_variables_shape + gate_execution_ravel_index
                 )
-                # Set coefficient to 1 for this gate execution variable
-                gate_execution_coefficients[flattened_gate_execution_index] = 1
+                # Add coefficient of 1 for this gate execution variable
+                gate_execution_sparse_data.add_coefficient(
+                    1.0, constraint_index, flattened_gate_execution_index
+                )
 
-            gate_execution_per_operation_constraints.append(gate_execution_coefficients)
+            # Move to next constraint row after processing all physical edges for this operation
+            constraint_index += 1
 
-        # Combine all operation constraints into single matrix
-        gate_execution_constraint = np.stack(gate_execution_per_operation_constraints)
+        # Build sparse coefficient matrix
+        # Total constraints = final constraint_index (number of constraints processed)
+        gate_execution_constraint = self._build_sparse_coefficient_matrix(
+            gate_execution_sparse_data, constraint_index
+        )
         return gate_execution_constraint
 
     def _generate_gate_mapping_constraint(self):
@@ -411,7 +605,10 @@ class MilpRouter:
         Returns:
             Coefficient matrix for gate mapping constraints.
         """
-        gate_mapping_per_operation_constraints = []
+        # Create sparse data container with default empty lists
+        gate_mapping_sparse_data = ConstraintMatrixSparseData()
+
+        constraint_index = 0
 
         # For each operation and each possible physical edge
         for operation_index in range(self.operation_count):
@@ -419,9 +616,6 @@ class MilpRouter:
             spaced_timestep = operation_index * self.worst_spacing
 
             for physical_edge_index in range(self.coupling_map.number_of_edges()):
-                # Create constraint row for this operation-edge combination
-                gate_mapping_coefficients = self._initialize_coefficient_matrix()
-
                 # Build multidimensional index for gate execution variable
                 gate_execution_multi_index = (
                     spaced_timestep,
@@ -436,13 +630,19 @@ class MilpRouter:
                 flattened_gate_execution_index = (
                     self.flat_mapping_variables_shape + gate_execution_ravel_index
                 )
-                # Set coefficient to 1 for gate execution variable
-                gate_mapping_coefficients[flattened_gate_execution_index] = 1
+                # Add coefficient of 1 for gate execution variable
+                gate_mapping_sparse_data.add_coefficient(
+                    1.0, constraint_index, flattened_gate_execution_index
+                )
 
-                gate_mapping_per_operation_constraints.append(gate_mapping_coefficients)
+                # Move to next constraint row after processing this operation-edge combination
+                constraint_index += 1
 
-        # Combine all operation-edge constraints into single matrix
-        gate_mapping_constraint = np.stack(gate_mapping_per_operation_constraints)
+        # Build sparse coefficient matrix
+        # Total constraints = final constraint_index (number of constraints processed)
+        gate_mapping_constraint = self._build_sparse_coefficient_matrix(
+            gate_mapping_sparse_data, constraint_index
+        )
         return gate_mapping_constraint
 
     def _generate_gate_mapping_left_qubit_constraint(self):
@@ -454,7 +654,10 @@ class MilpRouter:
         Returns:
             Coefficient matrix for left qubit mapping constraints.
         """
-        gate_mapping_left_per_operation_constraints = []
+        # Create sparse data container with default empty lists
+        gate_mapping_left_sparse_data = ConstraintMatrixSparseData()
+
+        constraint_index = 0
 
         # For each operation and each possible physical edge
         for operation_index in range(self.operation_count):
@@ -462,9 +665,6 @@ class MilpRouter:
             spaced_timestep = operation_index * self.worst_spacing
 
             for physical_edge_index in range(self.coupling_map.number_of_edges()):
-                # Create constraint row for this operation-edge combination
-                gate_mapping_left_coefficients = self._initialize_coefficient_matrix()
-
                 # Build multidimensional index for gate execution variable
                 gate_execution_multi_index = (
                     spaced_timestep,
@@ -479,8 +679,10 @@ class MilpRouter:
                 flattened_gate_execution_index = (
                     self.flat_mapping_variables_shape + gate_execution_ravel_index
                 )
-                # Set coefficient to 1 for gate execution variable
-                gate_mapping_left_coefficients[flattened_gate_execution_index] = 1
+                # Add coefficient of 1 for gate execution variable
+                gate_mapping_left_sparse_data.add_coefficient(
+                    1.0, constraint_index, flattened_gate_execution_index
+                )
 
                 # Get the logical qubits participating in this operation
                 left_logical_qubit, right_logical_qubit = self.operations[
@@ -500,16 +702,18 @@ class MilpRouter:
                 left_qubit_mapping_ravel_index = np.ravel_multi_index(
                     left_qubit_mapping_multi_index, self.mapping_variables_shape
                 )
-                # Set coefficient to -1 for left qubit mapping variable
-                gate_mapping_left_coefficients[left_qubit_mapping_ravel_index] = -1
-
-                gate_mapping_left_per_operation_constraints.append(
-                    gate_mapping_left_coefficients
+                # Add coefficient of -1 for left qubit mapping variable
+                gate_mapping_left_sparse_data.add_coefficient(
+                    -1.0, constraint_index, left_qubit_mapping_ravel_index
                 )
 
-        # Combine all operation-edge constraints into single matrix
-        gate_mapping_left_constraint = np.stack(
-            gate_mapping_left_per_operation_constraints
+                # Move to next constraint row after processing this operation-edge combination
+                constraint_index += 1
+
+        # Build sparse coefficient matrix
+        # Total constraints = final constraint_index (number of constraints processed)
+        gate_mapping_left_constraint = self._build_sparse_coefficient_matrix(
+            gate_mapping_left_sparse_data, constraint_index
         )
         return gate_mapping_left_constraint
 
@@ -522,7 +726,10 @@ class MilpRouter:
         Returns:
             Coefficient matrix for right qubit mapping constraints.
         """
-        gate_mapping_right_per_operation_constraints = []
+        # Create sparse data container with default empty lists
+        gate_mapping_right_sparse_data = ConstraintMatrixSparseData()
+
+        constraint_index = 0
 
         # For each operation and each possible physical edge
         for operation_index in range(self.operation_count):
@@ -530,9 +737,6 @@ class MilpRouter:
             spaced_timestep = operation_index * self.worst_spacing
 
             for physical_edge_index in range(self.coupling_map.number_of_edges()):
-                # Create constraint row for this operation-edge combination
-                gate_mapping_right_coefficients = self._initialize_coefficient_matrix()
-
                 # Build multidimensional index for gate execution variable
                 gate_execution_multi_index = (
                     spaced_timestep,
@@ -547,8 +751,10 @@ class MilpRouter:
                 flattened_gate_execution_index = (
                     self.flat_mapping_variables_shape + gate_execution_ravel_index
                 )
-                # Set coefficient to 1 for gate execution variable
-                gate_mapping_right_coefficients[flattened_gate_execution_index] = 1
+                # Add coefficient of 1 for gate execution variable
+                gate_mapping_right_sparse_data.add_coefficient(
+                    1.0, constraint_index, flattened_gate_execution_index
+                )
 
                 # Get the logical qubits participating in this operation
                 left_logical_qubit, right_logical_qubit = self.operations[
@@ -569,16 +775,18 @@ class MilpRouter:
                 right_qubit_mapping_ravel_index = np.ravel_multi_index(
                     right_qubit_mapping_multi_index, self.mapping_variables_shape
                 )
-                # Set coefficient to -1 for right qubit mapping variable
-                gate_mapping_right_coefficients[right_qubit_mapping_ravel_index] = -1
-
-                gate_mapping_right_per_operation_constraints.append(
-                    gate_mapping_right_coefficients
+                # Add coefficient of -1 for right qubit mapping variable
+                gate_mapping_right_sparse_data.add_coefficient(
+                    -1.0, constraint_index, right_qubit_mapping_ravel_index
                 )
 
-        # Combine all operation-edge constraints into single matrix
-        gate_mapping_right_constraint = np.stack(
-            gate_mapping_right_per_operation_constraints
+                # Move to next constraint row after processing this operation-edge combination
+                constraint_index += 1
+
+        # Build sparse coefficient matrix
+        # Total constraints = final constraint_index (number of constraints processed)
+        gate_mapping_right_constraint = self._build_sparse_coefficient_matrix(
+            gate_mapping_right_sparse_data, constraint_index
         )
         return gate_mapping_right_constraint
 
@@ -590,7 +798,10 @@ class MilpRouter:
         Returns:
             Coefficient matrix for full qubit mapping constraints.
         """
-        gate_mapping_full_per_operation_constraints = []
+        # Create sparse data container with default empty lists
+        gate_mapping_full_sparse_data = ConstraintMatrixSparseData()
+
+        constraint_index = 0
 
         # For each operation and each possible physical edge
         for operation_index in range(self.operation_count):
@@ -598,9 +809,6 @@ class MilpRouter:
             spaced_timestep = operation_index * self.worst_spacing
 
             for physical_edge_index in range(self.coupling_map.number_of_edges()):
-                # Create constraint row for this operation-edge combination
-                gate_mapping_full_coefficients = self._initialize_coefficient_matrix()
-
                 # Build multidimensional index for gate execution variable
                 gate_execution_multi_index = (
                     spaced_timestep,
@@ -615,8 +823,10 @@ class MilpRouter:
                 flattened_gate_execution_index = (
                     self.flat_mapping_variables_shape + gate_execution_ravel_index
                 )
-                # Set coefficient to 1 for gate execution variable
-                gate_mapping_full_coefficients[flattened_gate_execution_index] = 1
+                # Add coefficient of 1 for gate execution variable
+                gate_mapping_full_sparse_data.add_coefficient(
+                    1.0, constraint_index, flattened_gate_execution_index
+                )
 
                 # Get the logical qubits participating in this operation
                 left_logical_qubit, right_logical_qubit = self.operations[
@@ -637,8 +847,10 @@ class MilpRouter:
                 left_qubit_mapping_ravel_index = np.ravel_multi_index(
                     left_qubit_mapping_multi_index, self.mapping_variables_shape
                 )
-                # Set coefficient to -1 for left qubit mapping variable
-                gate_mapping_full_coefficients[left_qubit_mapping_ravel_index] = -1
+                # Add coefficient of -1 for left qubit mapping variable
+                gate_mapping_full_sparse_data.add_coefficient(
+                    -1.0, constraint_index, left_qubit_mapping_ravel_index
+                )
 
                 # Build multidimensional index for right qubit mapping variable
                 right_qubit_mapping_multi_index = (
@@ -650,16 +862,18 @@ class MilpRouter:
                 right_qubit_mapping_ravel_index = np.ravel_multi_index(
                     right_qubit_mapping_multi_index, self.mapping_variables_shape
                 )
-                # Set coefficient to -1 for right qubit mapping variable
-                gate_mapping_full_coefficients[right_qubit_mapping_ravel_index] = -1
-
-                gate_mapping_full_per_operation_constraints.append(
-                    gate_mapping_full_coefficients
+                # Add coefficient of -1 for right qubit mapping variable
+                gate_mapping_full_sparse_data.add_coefficient(
+                    -1.0, constraint_index, right_qubit_mapping_ravel_index
                 )
 
-        # Combine all operation-edge constraints into single matrix
-        gate_mapping_full_constraint = np.stack(
-            gate_mapping_full_per_operation_constraints
+                # Move to next constraint row after processing this operation-edge combination
+                constraint_index += 1
+
+        # Build sparse coefficient matrix
+        # Total constraints = final constraint_index (number of constraints processed)
+        gate_mapping_full_constraint = self._build_sparse_coefficient_matrix(
+            gate_mapping_full_sparse_data, constraint_index
         )
         return gate_mapping_full_constraint
 
@@ -672,7 +886,10 @@ class MilpRouter:
         Returns:
             Coefficient matrix for flow condition in constraints.
         """
-        flow_condition_in_per_timestep_constraints = []
+        # Create sparse data container with default empty lists
+        flow_condition_in_sparse_data = ConstraintMatrixSparseData()
+
+        constraint_index = 0
 
         # Calculate variable offset for movement variables in flattened decision vector
         movement_variables_offset = (
@@ -686,11 +903,6 @@ class MilpRouter:
             # For each logical qubit and each physical qubit position
             for logical_qubit in self.routed_circuit.qubits:
                 for physical_qubit in self.coupling_map.nodes:
-                    # Create constraint row for this logical-physical qubit combination
-                    flow_condition_in_coefficients = (
-                        self._initialize_coefficient_matrix()
-                    )
-
                     # Current timestep mapping variable gets coefficient +1
                     current_mapping_multi_index = (
                         timestep,
@@ -700,7 +912,9 @@ class MilpRouter:
                     current_mapping_ravel_index = np.ravel_multi_index(
                         current_mapping_multi_index, self.mapping_variables_shape
                     )
-                    flow_condition_in_coefficients[current_mapping_ravel_index] = 1
+                    flow_condition_in_sparse_data.add_coefficient(
+                        1.0, constraint_index, current_mapping_ravel_index
+                    )
 
                     # Previous timestep self-movement variable gets coefficient -1
                     prev_self_movement_multi_index = (
@@ -715,7 +929,9 @@ class MilpRouter:
                     prev_self_movement_flat_index = (
                         movement_variables_offset + prev_self_movement_ravel_index
                     )
-                    flow_condition_in_coefficients[prev_self_movement_flat_index] = -1
+                    flow_condition_in_sparse_data.add_coefficient(
+                        -1.0, constraint_index, prev_self_movement_flat_index
+                    )
 
                     # Previous timestep incoming movement variables get coefficient -1
                     for neighbor_physical_qubit in self.coupling_map.neighbors(
@@ -735,17 +951,17 @@ class MilpRouter:
                             movement_variables_offset
                             + prev_incoming_movement_ravel_index
                         )
-                        flow_condition_in_coefficients[
-                            prev_incoming_movement_flat_index
-                        ] = -1
+                        flow_condition_in_sparse_data.add_coefficient(
+                            -1.0, constraint_index, prev_incoming_movement_flat_index
+                        )
 
-                    flow_condition_in_per_timestep_constraints.append(
-                        flow_condition_in_coefficients
-                    )
+                    # Move to next constraint row after processing this logical-physical qubit combination
+                    constraint_index += 1
 
-        # Combine all flow condition in constraints into single matrix
-        flow_condition_in_constraint = np.stack(
-            flow_condition_in_per_timestep_constraints
+        # Build sparse coefficient matrix
+        # Total constraints = final constraint_index (number of constraints processed)
+        flow_condition_in_constraint = self._build_sparse_coefficient_matrix(
+            flow_condition_in_sparse_data, constraint_index
         )
         return flow_condition_in_constraint
 
@@ -758,7 +974,10 @@ class MilpRouter:
         Returns:
             Coefficient matrix for flow condition out constraints.
         """
-        flow_condition_out_per_timestep_constraints = []
+        # Create sparse data container with default empty lists
+        flow_condition_out_sparse_data = ConstraintMatrixSparseData()
+
+        constraint_index = 0
 
         # Calculate variable offset for movement variables in flattened decision vector
         movement_variables_offset = (
@@ -770,11 +989,6 @@ class MilpRouter:
             # For each logical qubit and each physical qubit position
             for logical_qubit in self.routed_circuit.qubits:
                 for physical_qubit in self.coupling_map.nodes:
-                    # Create constraint row for this logical-physical qubit combination
-                    flow_condition_out_coefficients = (
-                        self._initialize_coefficient_matrix()
-                    )
-
                     # Current timestep mapping variable gets coefficient +1
                     current_mapping_multi_index = (
                         timestep,
@@ -784,7 +998,9 @@ class MilpRouter:
                     current_mapping_ravel_index = np.ravel_multi_index(
                         current_mapping_multi_index, self.mapping_variables_shape
                     )
-                    flow_condition_out_coefficients[current_mapping_ravel_index] = 1
+                    flow_condition_out_sparse_data.add_coefficient(
+                        1.0, constraint_index, current_mapping_ravel_index
+                    )
 
                     # Current timestep self-movement variable gets coefficient -1
                     current_self_movement_multi_index = (
@@ -799,9 +1015,9 @@ class MilpRouter:
                     current_self_movement_flat_index = (
                         movement_variables_offset + current_self_movement_ravel_index
                     )
-                    flow_condition_out_coefficients[
-                        current_self_movement_flat_index
-                    ] = -1
+                    flow_condition_out_sparse_data.add_coefficient(
+                        -1.0, constraint_index, current_self_movement_flat_index
+                    )
 
                     # Current timestep outgoing movement variables get coefficient -1
                     for neighbor_physical_qubit in self.coupling_map.neighbors(
@@ -821,17 +1037,17 @@ class MilpRouter:
                             movement_variables_offset
                             + current_outgoing_movement_ravel_index
                         )
-                        flow_condition_out_coefficients[
-                            current_outgoing_movement_flat_index
-                        ] = -1
+                        flow_condition_out_sparse_data.add_coefficient(
+                            -1.0, constraint_index, current_outgoing_movement_flat_index
+                        )
 
-                    flow_condition_out_per_timestep_constraints.append(
-                        flow_condition_out_coefficients
-                    )
+                    # Move to next constraint row after processing this logical-physical qubit combination
+                    constraint_index += 1
 
-        # Combine all flow condition out constraints into single matrix
-        flow_condition_out_constraint = np.stack(
-            flow_condition_out_per_timestep_constraints
+        # Build sparse coefficient matrix
+        # Total constraints = final constraint_index (number of constraints processed)
+        flow_condition_out_constraint = self._build_sparse_coefficient_matrix(
+            flow_condition_out_sparse_data, constraint_index
         )
         return flow_condition_out_constraint
 
@@ -856,8 +1072,6 @@ class MilpRouter:
             # Generate the coefficient matrix
             coefficient_matrix = generate_constraint()
 
-            print(constraint_name, coefficient_matrix.shape, lower_bound, upper_bound)
-
             # Create a scipy LinearConstraint object
             linear_constraint = scipy.optimize.LinearConstraint(
                 A=coefficient_matrix, lb=lower_bound, ub=upper_bound
@@ -877,7 +1091,9 @@ class MilpRouter:
             Optimisation coefficient vector with shape (full_decision_variables_shape, ).
         """
         # Initialize coefficient vector for all decision variables
-        optimisation_coefficients = self._initialize_coefficient_matrix()
+        optimisation_coefficients = np.zeros(
+            self.full_decision_variables_shape, dtype=DEFAULT_CONSTRAINT_TYPE
+        )
 
         # Calculate variable offset for movement variables in flattened decision vector
         movement_variables_offset = (
@@ -955,7 +1171,8 @@ class MilpRouter:
 
         # TODO: Round solution to handle numerical precision issues
         # This may be removed when transitioning to scipy.optimize.linprog
-        milp_result.x = np.rint(milp_result.x)
+        # TODO: fix typing issue
+        milp_result.x = np.rint(milp_result.x)  # type: ignore
 
         return milp_result
 
@@ -1019,4 +1236,5 @@ class MilpRouter:
             mapping_variables=mapping_variables,
             gate_execution_variables=gate_execution_variables,
             qubit_movement_variables=qubit_movement_variables,
+            worst_spacing=self.worst_spacing,
         )
