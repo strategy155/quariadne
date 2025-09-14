@@ -28,24 +28,25 @@ DAG_VISUALISATION_TITLE = "Visualised DAG"
 
 @dataclasses.dataclass(frozen=True)
 class ComputationalNode(abc.ABC):
-    """
-    This is a baseclass for all the nodes in the internal DAG representation of the routing circuit.
-    """
+    """Base class for all nodes in the internal DAG representation of the routing circuit."""
 
     @property
     @abc.abstractmethod
     def label(self):
-        """
-        This method should return the label of the node,
-        for plotting purposes
+        """Return the label of the node for plotting purposes.
+
+        Returns:
+            str: The label to be used for plotting this node.
         """
         raise NotImplementedError()
 
 
 @dataclasses.dataclass(frozen=True)
 class WireStart(ComputationalNode):
-    """
-    This is a class, which represents the DAG wire start.
+    """Represents the start of a DAG wire.
+
+    Attributes:
+        qubit: The logical qubit associated with this wire start.
     """
 
     qubit: quariadne.circuit.LogicalQubit
@@ -57,8 +58,10 @@ class WireStart(ComputationalNode):
 
 @dataclasses.dataclass(frozen=True)
 class WireEnd(ComputationalNode):
-    """
-    This is a class, which represents the end of the DAG wire
+    """Represents the end of a DAG wire.
+
+    Attributes:
+        qubit: The logical qubit associated with this wire end.
     """
 
     qubit: quariadne.circuit.LogicalQubit
@@ -70,26 +73,24 @@ class WireEnd(ComputationalNode):
 
 @dataclasses.dataclass(frozen=True)
 class Gate(ComputationalNode):
-    """This is a class, representing the gate operations. It now has this parent_id parameter,
-    which, for now, makes it unique (to make the connections in the graph easier.
+    """Represents gate operations in the computational DAG.
 
-    Args:
-        qubits_participating: controls the amount of logical qubits participating in the gate
-        name: the name of the operation
+    The gate_id parameter makes each gate unique to facilitate graph connections.
 
-        gate_id: exclusively needed for the DAG plotting, and graph unwrapping, to compare different node-timesteps.
-
+    Attributes:
+        operation: The quantum operation containing name and participating qubits.
+        gate_id: Unique identifier for the gate, used for DAG plotting and graph unwrapping
+            to compare different node timesteps.
     """
 
-    qubits_participating: typing.Tuple[quariadne.circuit.LogicalQubit, ...]
-    name: str
+    operation: quariadne.circuit.QuantumOperation
 
     # we don't want to include that field into representation because its ugly and uninformative
     gate_id: int = dataclasses.field(repr=False)
 
     @property
     def label(self):
-        return self.name
+        return self.operation.name
 
 
 TRANSITION_QUBIT_FIELD = "qubit_index"
@@ -97,8 +98,12 @@ TRANSITION_QUBIT_FIELD = "qubit_index"
 
 @dataclasses.dataclass
 class Transition:
-    """
-    This class represents the transition between two computational nodes in the DAG.
+    """Represents a transition between two computational nodes in the DAG.
+
+    Attributes:
+        from_node: The source computational node.
+        to_node: The destination computational node.
+        underlying_qubit: The logical qubit associated with this transition.
     """
 
     from_node: ComputationalNode
@@ -106,14 +111,10 @@ class Transition:
     underlying_qubit: quariadne.circuit.LogicalQubit
 
     def as_nx_edge(self):
-        """
-        Converts the current edge to a NetworkX-compatible edge representation.
+        """Convert the transition to a NetworkX-compatible edge representation.
 
-        Returns the edge as a tuple containing the source node and target node,
-        which can be used directly with NetworkX graphs.
-
-        :return nx_edge: Edge as a tuple containing the source node and target node.
-        :rtype NXEdge:
+        Returns:
+            NXEdge: Tuple containing the source node and target node.
         """
         nx_edge = (
             self.from_node,
@@ -124,14 +125,11 @@ class Transition:
 
 @dataclasses.dataclass
 class ComputationalDAG:
-    """This class represents a computational circuit abstraction,
-     containing only relevant objects for routing
+    """Represents a computational circuit abstraction containing only routing-relevant objects.
 
-    Args:
-        nodes: list of computational nodes in the circuit
-        transitions: list of state transitions in the circuit between the nodes
-
-
+    Attributes:
+        nodes: List of computational nodes in the circuit.
+        transitions: List of state transitions between nodes in the circuit.
     """
 
     nodes: typing.List[ComputationalNode]
@@ -141,18 +139,16 @@ class ComputationalDAG:
     def _convert_qiskit_dag_node(
         qiskit_dag_node: QiskitDAGNode,
     ) -> ComputationalNode:
-        """This function converts a qiskit dag node (there are three types of them until now, see :type QiskitDAGNode:)
-        to the corresponding quariadne nodes.
+        """Convert a Qiskit DAG node to the corresponding Quariadne node.
 
         Args:
-            qiskit_dag_node (QiskitDAGEdge): a node, which we expect to convert to internal classes
-            current_timestep (int): the current timestep of the circuit with the converter
+            qiskit_dag_node: A Qiskit DAG node to convert to internal classes.
 
         Returns:
-            quariadne.circuit.ComputationalNode: The function returns the corresponding quariadne node
+            The corresponding Quariadne computational node.
 
         Raises:
-            TypeError, if the function got an unexpected type of node
+            TypeError: If an unexpected node type is encountered.
         """
         routing_node: ComputationalNode
 
@@ -164,8 +160,11 @@ class ComputationalDAG:
                 gate_qubits_participating = tuple(
                     quariadne.circuit.LogicalQubit(wire._index) for wire in gate_wires
                 )
+                gate_operation = quariadne.circuit.QuantumOperation(
+                    gate_name, gate_qubits_participating
+                )
                 gate_id = hash(qiskit_dag_node)
-                routing_node = Gate(gate_qubits_participating, gate_name, gate_id)
+                routing_node = Gate(gate_operation, gate_id)
             case (
                 (
                     qiskit.dagcircuit.DAGInNode | qiskit.dagcircuit.DAGOutNode
@@ -188,13 +187,13 @@ class ComputationalDAG:
         cls,
         qiskit_dag_edge: QiskitDAGEdge,
     ) -> Transition:
-        """this function gets a qiskit dag edge, and returns properly constructed transition object.
+        """Convert a Qiskit DAG edge to a properly constructed transition object.
 
-         Args:
-             qiskit_dag_edge (QiskitDAGEdge): a qiskit dag edge object, which is a tuple of a special type.
+        Args:
+            qiskit_dag_edge: A Qiskit DAG edge object tuple.
 
         Returns:
-            It returns the corresponding transition for the routing circuit
+            The corresponding transition for the routing circuit.
         """
         # unpacking the meaningful objects
         in_node, out_node, wire = qiskit_dag_edge
@@ -209,13 +208,13 @@ class ComputationalDAG:
 
     @classmethod
     def from_qiskit_dag(cls, qiskit_dag: qiskit.dagcircuit.DAGCircuit):
-        """This function takes qiskit dag circuit as input,
-         and converts it to internal routing circuit representation.
+        """Convert a Qiskit DAG circuit to internal routing circuit representation.
 
         Args:
-            qiskit_dag: a qiskit dag circuit object, which is easily obtained from qiskit circuit.
+            qiskit_dag: A Qiskit DAG circuit object.
 
-
+        Returns:
+            ComputationalDAG: The converted routing circuit representation.
         """
         # obtaining generators for nodes and edges
         random_dag_nodes = qiskit_dag.nodes()
@@ -270,7 +269,14 @@ class ComputationalDAG:
 
     @staticmethod
     def _generate_topological_layout(routing_dag: nx.MultiDiGraph):
-        """This function gets a DAG and then generates a topological layout for it."""
+        """Generate a topological layout for the given DAG.
+
+        Args:
+            routing_dag: A NetworkX MultiDiGraph representing the DAG.
+
+        Returns:
+            dict: A multipartite layout dictionary mapping nodes to positions.
+        """
 
         # first we generate a layer spread by topological sorting
         for layer, nodes in enumerate(nx.topological_generations(routing_dag)):
@@ -282,10 +288,10 @@ class ComputationalDAG:
         return multipartite_layout
 
     def _generate_edge_labels_map(self):
-        """This function generates a mapper for edges plotting (networkx style)
+        """Generate a mapper for edge plotting in NetworkX style.
 
         Returns:
-            dict: a map of nx edge to edge label string
+            dict: Mapping from NetworkX edge to edge label string.
         """
         label_by_edge = {}
         for transition in self.transitions:
@@ -296,14 +302,48 @@ class ComputationalDAG:
         return label_by_edge
 
     def _generate_node_labels_map(self):
-        """This function generates a mapper for nodes plotting (networkx style)."""
+        """Generate a mapper for node plotting in NetworkX style.
+
+        Returns:
+            dict: Mapping from nodes to their labels.
+        """
         label_by_node = {}
         for node in self.nodes:
             label_by_node[node] = node.label
         return label_by_node
 
+    def to_abstract_quantum_circuit(self) -> "quariadne.circuit.AbstractQuantumCircuit":
+        """Convert the computational DAG to an AbstractQuantumCircuit.
+
+        Filters out WireStart and WireEnd nodes, keeping only Gate nodes,
+        and uses topological sorting to generate the chronological sequence of operations.
+
+        Returns:
+            AbstractQuantumCircuit: The converted circuit with operations in topological order.
+        """
+        nx_dag = self.to_nx()
+
+        qubits = []
+        for node in self.nodes:
+            if isinstance(node, WireStart):
+                qubits.append(node.qubit)
+
+        operations = []
+        for node in nx.topological_sort(nx_dag):
+            if isinstance(node, Gate):
+                operations.append(node.operation)
+
+        abstract_circuit = quariadne.circuit.AbstractQuantumCircuit(
+            operations, tuple(qubits)
+        )
+        return abstract_circuit
+
     def plot_dag(self):
-        """This function visualises the DAG corresponding to the routed circuit"""
+        """Visualise the DAG corresponding to the routed circuit.
+
+        Returns:
+            tuple: A tuple containing the matplotlib figure and axis objects.
+        """
 
         # generating helper topology, and label mappers
         routing_dag = self.to_nx()
