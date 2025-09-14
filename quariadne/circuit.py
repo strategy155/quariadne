@@ -13,7 +13,7 @@ class PhysicalQubit:
 
 @dataclasses.dataclass(frozen=True)
 class LogicalQubit:
-    """This class represents physical qubit, which is present in the coupling schemes."""
+    """This class represents logical qubit, which is present in the coupling schemes."""
 
     index: int
 
@@ -49,6 +49,34 @@ class LogicalQubit:
             cls.from_qiskit_wire(qiskit_wire) for qiskit_wire in qiskit_wires
         )
         return logical_qubits
+
+
+@dataclasses.dataclass(frozen=True)
+class PhysicalSwap:
+    """Represents a SWAP operation between two physical qubits.
+
+    The swap is order-independent: PhysicalSwap(q1, q2) == PhysicalSwap(q2, q1).
+    Uses frozenset for unordered comparison and hashing.
+
+    Attributes:
+        first: First physical qubit in the swap
+        second: Second physical qubit in the swap
+    """
+
+    first: PhysicalQubit
+    second: PhysicalQubit
+
+    def __eq__(self, other: object) -> bool:
+        """Compare swaps as unordered pairs."""
+        if not isinstance(other, PhysicalSwap):
+            return NotImplemented
+        return frozenset([self.first, self.second]) == frozenset(
+            [other.first, other.second]
+        )
+
+    def __hash__(self) -> int:
+        """Hash based on unordered pair."""
+        return hash(frozenset([self.first, self.second]))
 
 
 @dataclasses.dataclass(frozen=True)
