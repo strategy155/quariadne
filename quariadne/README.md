@@ -4,4 +4,3 @@ NB!:
 
 The interesting addition for the MILP itself would be to add something like an einsum interface,
 which will allow to describe the operations of the constraints in a simple manner, and in turn generate the constraints.
-For now it looks ugly. !!

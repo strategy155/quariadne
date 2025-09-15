@@ -4,16 +4,13 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="72376229-81b2-4aab-affa-e69c21520671" name="Changes" comment="Added the MILP router module for qiskit">
-      <change afterPath="$PROJECT_DIR$/quariadne/qiskit_passes.py" afterDir="false" />
+    <list default="true" id="72376229-81b2-4aab-affa-e69c21520671" name="Changes" comment="Created qiskit interfaces and binding to the thing. Updated the deps for that.">
+      <change beforePath="$PROJECT_DIR$/.idea/misc.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/misc.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/quariadne.iml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/quariadne.iml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/notebook/MILP reconstruction.ipynb" beforeDir="false" afterPath="$PROJECT_DIR$/notebook/MILP reconstruction.ipynb" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/notebook/MILP.ipynb" beforeDir="false" afterPath="$PROJECT_DIR$/notebook/MILP.ipynb" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/README.md" beforeDir="false" />
       <change beforePath="$PROJECT_DIR$/pyproject.toml" beforeDir="false" afterPath="$PROJECT_DIR$/pyproject.toml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/quariadne/circuit.py" beforeDir="false" afterPath="$PROJECT_DIR$/quariadne/circuit.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/quariadne/computational_graph.py" beforeDir="false" afterPath="$PROJECT_DIR$/quariadne/computational_graph.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/quariadne/milp_router.py" beforeDir="false" afterPath="$PROJECT_DIR$/quariadne/milp_router.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/uv.lock" beforeDir="false" afterPath="$PROJECT_DIR$/uv.lock" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/quariadne/README.md" beforeDir="false" afterPath="$PROJECT_DIR$/quariadne/README.md" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -51,21 +48,22 @@
     <option name="hideEmptyMiddlePackages" value="true" />
     <option name="showLibraryContents" value="true" />
   </component>
-  <component name="PropertiesComponent">{
-  &quot;keyToString&quot;: {
-    &quot;ModuleVcsDetector.initialDetectionPerformed&quot;: &quot;true&quot;,
-    &quot;RunOnceActivity.ShowReadmeOnStart&quot;: &quot;true&quot;,
-    &quot;RunOnceActivity.git.unshallow&quot;: &quot;true&quot;,
-    &quot;git-widget-placeholder&quot;: &quot;dev&quot;,
-    &quot;node.js.detected.package.eslint&quot;: &quot;true&quot;,
-    &quot;node.js.detected.package.tslint&quot;: &quot;true&quot;,
-    &quot;node.js.selected.package.eslint&quot;: &quot;(autodetect)&quot;,
-    &quot;node.js.selected.package.tslint&quot;: &quot;(autodetect)&quot;,
-    &quot;nodejs_package_manager_path&quot;: &quot;npm&quot;,
-    &quot;settings.editor.selected.configurable&quot;: &quot;editor.preferences.completion&quot;,
-    &quot;vue.rearranger.settings.migration&quot;: &quot;true&quot;
+  <component name="PropertiesComponent"><![CDATA[{
+  "keyToString": {
+    "ModuleVcsDetector.initialDetectionPerformed": "true",
+    "RunOnceActivity.ShowReadmeOnStart": "true",
+    "RunOnceActivity.git.unshallow": "true",
+    "git-widget-placeholder": "dev",
+    "last_opened_file_path": "/home/parf/projects/work/quariadne",
+    "node.js.detected.package.eslint": "true",
+    "node.js.detected.package.tslint": "true",
+    "node.js.selected.package.eslint": "(autodetect)",
+    "node.js.selected.package.tslint": "(autodetect)",
+    "nodejs_package_manager_path": "npm",
+    "settings.editor.selected.configurable": "editor.preferences.completion",
+    "vue.rearranger.settings.migration": "true"
   }
-}</component>
+}]]></component>
   <component name="RunManager">
     <configuration default="true" type="lua.app" factoryName="Lua Application">
       <option name="program" value="/usr/bin/lua" />
@@ -199,6 +197,7 @@
       <workItem from="1757667270867" duration="6458000" />
       <workItem from="1757761290497" duration="1937000" />
       <workItem from="1757847095783" duration="4598000" />
+      <workItem from="1757860329723" duration="1215000" />
     </task>
     <task id="LOCAL-00001" summary="initial steup probelms fixed, and this is obviously somethign like an iintila commit">
       <option name="closed" value="true" />
@@ -296,11 +295,81 @@
       <option name="project" value="LOCAL" />
       <updated>1755246503060</updated>
     </task>
-    <option name="localTasksCounter" value="13" />
+    <task id="LOCAL-00013" summary="Added the physical swap dataclass and minor fixes in docs">
+      <option name="closed" value="true" />
+      <created>1757860455418</created>
+      <option name="number" value="00013" />
+      <option name="presentableId" value="LOCAL-00013" />
+      <option name="project" value="LOCAL" />
+      <updated>1757860455418</updated>
+    </task>
+    <task id="LOCAL-00014" summary="pure metadata changes in the nbs">
+      <option name="closed" value="true" />
+      <created>1757860481601</created>
+      <option name="number" value="00014" />
+      <option name="presentableId" value="LOCAL-00014" />
+      <option name="project" value="LOCAL" />
+      <updated>1757860481601</updated>
+    </task>
+    <task id="LOCAL-00015" summary="Added notebooks for testing the qiskit plugins and the LP development">
+      <option name="closed" value="true" />
+      <created>1757860496559</created>
+      <option name="number" value="00015" />
+      <option name="presentableId" value="LOCAL-00015" />
+      <option name="project" value="LOCAL" />
+      <updated>1757860496559</updated>
+    </task>
+    <task id="LOCAL-00016" summary="Added the documentation for the computational DAG.&#10;&#10;Fixed some naming issues. Moved to QO backend. Created a converter for the AQC.">
+      <option name="closed" value="true" />
+      <created>1757861007821</created>
+      <option name="number" value="00016" />
+      <option name="presentableId" value="LOCAL-00016" />
+      <option name="project" value="LOCAL" />
+      <updated>1757861007821</updated>
+    </task>
+    <task id="LOCAL-00017" summary="Overhauled the typing system, and finalised the MILP router. &#10;&#10;Moved to sparse backend. Fixed issues with integer shape typings. Added dataclass for sparse matrices creation. Added to the result interface the initial mapping getter and the swap getter. Added coupling graph converter. Some typing issues are unfixed due to vendor scipy problems. Added worst spacing to the results.">
+      <option name="closed" value="true" />
+      <created>1757861122154</created>
+      <option name="number" value="00017" />
+      <option name="presentableId" value="LOCAL-00017" />
+      <option name="project" value="LOCAL" />
+      <updated>1757861122157</updated>
+    </task>
+    <task id="LOCAL-00018" summary="Created qiskit interfaces and binding to the thing. Updated the deps for that.">
+      <option name="closed" value="true" />
+      <created>1757861148589</created>
+      <option name="number" value="00018" />
+      <option name="presentableId" value="LOCAL-00018" />
+      <option name="project" value="LOCAL" />
+      <updated>1757861148589</updated>
+    </task>
+    <option name="localTasksCounter" value="19" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
     <option name="version" value="3" />
+  </component>
+  <component name="Vcs.Log.Tabs.Properties">
+    <option name="OPEN_GENERIC_TABS">
+      <map>
+        <entry key="e98a413e-29c5-4f16-b3ea-4115f57f9e41" value="TOOL_WINDOW" />
+        <entry key="eee73c6d-4814-4cf5-ac2d-da8a8e38c506" value="TOOL_WINDOW" />
+      </map>
+    </option>
+    <option name="TAB_STATES">
+      <map>
+        <entry key="e98a413e-29c5-4f16-b3ea-4115f57f9e41">
+          <value>
+            <State />
+          </value>
+        </entry>
+        <entry key="eee73c6d-4814-4cf5-ac2d-da8a8e38c506">
+          <value>
+            <State />
+          </value>
+        </entry>
+      </map>
+    </option>
   </component>
   <component name="VcsManagerConfiguration">
     <MESSAGE value="initial steup probelms fixed, and this is obviously somethign like an iintila w" />
@@ -319,6 +388,13 @@
     <MESSAGE value="Started using claude and added the diagnostic and documentation files." />
     <MESSAGE value="In the middle of transferrring of the MILP ipynb experiments to the stabilised API. WIP" />
     <MESSAGE value="Working on the documentation improving. &#10;&#10;Finalised the interfaces for the results, for now. &#10;&#10;WIP" />
-    <option name="LAST_COMMIT_MESSAGE" value="Working on the documentation improving. &#10;&#10;Finalised the interfaces for the results, for now. &#10;&#10;WIP" />
+    <MESSAGE value="Added the physical swap dataclass and minor fixes in docs" />
+    <MESSAGE value="pure metadata changes in the nbs" />
+    <MESSAGE value="Added notebooks for testing the qiskit plugins and the LP development" />
+    <MESSAGE value="created qiskit transsformation and analysis passes for milp layout and routing plugins" />
+    <MESSAGE value="Added the documentation for the computational DAG.&#10;&#10;Fixed some naming issues. Moved to QO backend. Created a converter for the AQC." />
+    <MESSAGE value="Overhauled the typing system, and finalised the MILP router. &#10;&#10;Moved to sparse backend. Fixed issues with integer shape typings. Added dataclass for sparse matrices creation. Added to the result interface the initial mapping getter and the swap getter. Added coupling graph converter. Some typing issues are unfixed due to vendor scipy problems. Added worst spacing to the results." />
+    <MESSAGE value="Created qiskit interfaces and binding to the thing. Updated the deps for that." />
+    <option name="LAST_COMMIT_MESSAGE" value="Created qiskit interfaces and binding to the thing. Updated the deps for that." />
   </component>
 </project>
