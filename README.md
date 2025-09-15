@@ -30,12 +30,17 @@ The plugins must be used together with Qiskit's `generate_preset_pass_manager()`
 ```python
 import qiskit
 from qiskit_ibm_runtime.fake_provider import FakeManilaV2
+from qiskit_ibm_runtime import Session
+from qiskit_ibm_runtime import SamplerV2 as Sampler
+
 
 # Create a quantum circuit
-circuit = qiskit.QuantumCircuit(3, 3)
+circuit = qiskit.QuantumCircuit(3)
 circuit.h(0)
 circuit.cx(0, 1)
 circuit.cx(1, 2)
+circuit.cx(0, 2) # NOT POSSIBLE ON THE CHOSEN BACKEND!
+
 
 # Set up backend
 backend = FakeManilaV2()
@@ -50,6 +55,14 @@ pass_manager = qiskit.transpiler.generate_preset_pass_manager(
 
 # Transpile the circuit
 transpiled_circuit = pass_manager.run(circuit)
+
+# Proper testing cycle with real sampler
+with Session(backend=backend) as session:
+    sampler = Sampler(mode=session)
+    job = sampler.run([transpiled_circuit])
+    result = job.result()[0]
+    print(result)
+
 ```
 
 ## Important Limitations
@@ -64,24 +77,6 @@ Larger circuits may experience significant performance degradation due to MILP c
 ### Plugin Dependencies
 **Critical**: The layout and routing plugins are interdependent and **cannot be used separately**. Using only one plugin will result in failure.
 
-## Testing and Validation
-
-### Use Real Samplers for Testing
-Regular circuit execution won't detect illegal operations on backends. Always test with real samplers as shown in the example:
-
-```python
-from qiskit_ibm_runtime import Session
-from qiskit_ibm_runtime import SamplerV2 as Sampler
-
-# Proper testing cycle with real sampler
-with Session(backend=backend) as session:
-    sampler = Sampler(mode=session)
-    job = sampler.run([transpiled_circuit])
-    result = job.result()[0]
-    print(result)
-```
-
-This approach ensures illegal operations on the backend are properly detected during testing.
 
 ## Example Workflow
 
@@ -109,3 +104,7 @@ The routing plugin depends on results from the layout plugin, making them insepa
 - Use real samplers for proper testing validation
 
 For more details on Qiskit transpiler plugins, refer to the [Qiskit Transpiler Documentation](https://quantum.cloud.ibm.com/docs/en/api/qiskit/transpiler).
+
+
+
+IMPORTANT DISCLAIMER: This code was written by me, with a serious help of Claude Code. Every bit of code was verified, but still there are risks. Use at your own risk. 
