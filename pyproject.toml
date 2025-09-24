@@ -5,6 +5,7 @@ description = "Exact solvers of the qubit routing problem"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
+    "birkhoff",
     "matplotlib>=3.10.3",
     "mypy>=1.16.0",
     "networkx>=3.5",
@@ -23,6 +24,9 @@ dependencies = [
 
 [tool.uv]
 package = true
+
+[tool.uv.sources]
+birkhoff = { git = "https://github.com/strategy155/birkhoff.git" }
 
 [build-system]
 requires = ["hatchling"]
