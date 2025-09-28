@@ -42,6 +42,7 @@ MINUS_ONE_LOWER_BOUND = -1
 BINARY_VARIABLE_LOWER_BOUND = 0
 BINARY_VARIABLE_UPPER_BOUND = 1
 INTEGER_VARIABLE_INTEGRALITY = 1
+CONTINUOUS_VARIABLE_INTEGRALITY = 0
 
 type VariableShape = tuple[int, ...]
 
@@ -100,6 +101,8 @@ class MilpRouterResult:
     - mapping_variables: qubit-to-physical mapping at each timestep
     - gate_execution_variables: which gates execute on which physical edges
     - qubit_movement_variables: qubit movement between physical locations
+
+    This is a pure data container. Use IlpRouter for processing and extracting routing information.
     """
 
     milp_result: scipy.optimize.OptimizeResult
@@ -107,89 +110,6 @@ class MilpRouterResult:
     gate_execution_variables: np.ndarray
     qubit_movement_variables: np.ndarray
     worst_spacing: int
-
-    @property
-    def initial_mapping(
-        self,
-    ) -> dict[quariadne.circuit.LogicalQubit, quariadne.circuit.PhysicalQubit]:
-        """Calculate initial mapping from mapping variables at timestep 0.
-
-        Extracts the mapping at the first timestep (t=0) and returns a dictionary
-        mapping logical qubits to physical qubits for the initial state.
-
-        Returns:
-            Dictionary mapping LogicalQubit objects to PhysicalQubit objects
-            representing the initial qubit mapping.
-        """
-        # Extract the mapping matrix at timestep 0
-        initial_timestep_mapping = self.mapping_variables[0]
-
-        # Find all non-zero positions (physical_idx, logical_idx) where mapping exists
-        initial_mapping_indices = np.argwhere(initial_timestep_mapping)
-
-        # Convert numpy array to Python list for iteration
-        # tolist() ensures we get Python integers rather than numpy.int64 objects
-        # which are required for the PhysicalQubit and LogicalQubit constructors
-        initial_mapping_indices_list = initial_mapping_indices.tolist()
-
-        # Build the mapping dictionary (logical → physical, matching notebook implementation)
-        mapping_dict = {}
-        for physical_idx, logical_idx in initial_mapping_indices_list:
-            physical_qubit = quariadne.circuit.PhysicalQubit(physical_idx)
-            logical_qubit = quariadne.circuit.LogicalQubit(logical_idx)
-            mapping_dict[logical_qubit] = physical_qubit
-
-        return mapping_dict
-
-    @property
-    def inserted_swaps(self) -> dict[int, list[quariadne.circuit.PhysicalSwap]]:
-        """Extract swap operations from qubit movement variables.
-
-        TODO: Implement this operation e2e, now this is too raw.
-        Analyses the qubit movement variables to identify SWAP operations that occur
-        after each operation timestep. SWAP operations are detected by finding pairs of
-        qubits that exchange positions between physical locations.
-
-        Returns:
-            Dictionary mapping operation indices (0-based) to lists of PhysicalSwap objects.
-            Each swap pair is represented as a PhysicalSwap containing two PhysicalQubit objects.
-
-        Example:
-            {
-                0: [],  # No swaps after operation 0
-                1: [PhysicalSwap(PhysicalQubit(0), PhysicalQubit(1))],  # SWAP between physical qubits 0 and 1 after operation 1
-                2: [PhysicalSwap(PhysicalQubit(2), PhysicalQubit(3)), PhysicalSwap(PhysicalQubit(0), PhysicalQubit(4))]  # Two SWAPs after operation 2
-            }
-        """
-        swap_pairs_by_operation: defaultdict = defaultdict(list)
-
-        # Find all non-zero movement variables where actual movement occurs
-        defined_movements = np.argwhere(self.qubit_movement_variables)
-
-        for movement in defined_movements:
-            timestep, logical_qubit, from_qubit, to_qubit = movement.tolist()
-
-            # Only consider actual movements (not self-assignments)
-            if from_qubit != to_qubit:
-                # Convert timestep to operation index using worst_spacing division
-                # The +1 is an offset accounting for the fact that swaps happen AFTER respective operations
-                operation_index = timestep // self.worst_spacing + 1
-
-                # Create PhysicalSwap with proper qubit objects
-                physical_qubit_from = quariadne.circuit.PhysicalQubit(from_qubit)
-                physical_qubit_to = quariadne.circuit.PhysicalQubit(to_qubit)
-                swap_pair = quariadne.circuit.PhysicalSwap(
-                    physical_qubit_from, physical_qubit_to
-                )
-
-                # Get current operation's swap list
-                current_operation_swaps = swap_pairs_by_operation[operation_index]
-
-                # Add swap pair if not already present (avoids duplicates through PhysicalSwap equality)
-                if swap_pair not in current_operation_swaps:
-                    current_operation_swaps.append(swap_pair)
-
-        return swap_pairs_by_operation
 
 
 def get_coupling_graph(coupling_map: qiskit.transpiler.CouplingMap) -> nx.DiGraph:
@@ -239,13 +159,12 @@ def get_coupling_graph(coupling_map: qiskit.transpiler.CouplingMap) -> nx.DiGrap
     return coupling_graph_nx
 
 
-class MilpRouter:
-    """Mixed-Integer Linear Programming router for quantum circuit qubit routing.
+class MilpScipyRouter:
+    """Mixed-Integer Linear Programming router using scipy.optimize.milp for quantum circuit qubit routing.
 
-    Implements a MILP-based approach to solve the quantum circuit routing problem,
-    where logical qubits must be mapped to physical qubits while respecting hardware
-    coupling constraints. The router uses scipy.optimize.milp to find optimal
-    qubit mappings and SWAP operations.
+    Implements the MILP formulation and constraint generation for the quantum circuit routing problem.
+    This class handles the mathematical optimisation using scipy but does not process the results.
+    Use IlpRouter for complete routing functionality including result processing.
 
     The MILP formulation includes three types of decision variables:
     - Mapping variables: qubit-to-physical mapping at each timestep
@@ -1267,17 +1186,18 @@ class MilpRouter:
 
         constraint_index = 0
 
+        fixed_steps_count = self.fixed_mapping.shape[0]
+
         # Iterate through operation timesteps (not all spaced timesteps)
-        for operation_index in range(self.fixed_mapping.shape[0]):
+        for operation_index in range(fixed_steps_count):
             # Calculate the timestep when this operation is scheduled to execute
             spaced_timestep = operation_index * self.worst_spacing
 
             # Get the fixed mapping for this timestep
             timestep_fixed_mapping = self.fixed_mapping[operation_index]
-
+            print(timestep_fixed_mapping.shape, self.fixed_mapping.shape)
             # Find all non-zero positions in the fixed mapping for this timestep
             fixed_mapping_indices = np.argwhere(timestep_fixed_mapping)
-
             for physical_idx, logical_idx in fixed_mapping_indices:
                 # Build multidimensional index for mapping variable
                 mapping_multi_index = (
@@ -1426,12 +1346,15 @@ class MilpRouter:
             bounds=variables_bounds,
             constraints=constraints,
         )
-
+        print(milp_result)
         # TODO: Round solution to handle numerical precision issues
         # This may be removed when transitioning to scipy.optimize.linprog
         # TODO: fix typing issue
         if self.integrality == INTEGER_VARIABLE_INTEGRALITY:
             milp_result.x = np.rint(milp_result.x)  # type: ignore
+        elif self.integrality == CONTINUOUS_VARIABLE_INTEGRALITY:
+            close_to_zero_mask = np.isclose(milp_result.x, 0)
+            milp_result.x[close_to_zero_mask] = 0
 
         return milp_result
 
@@ -1477,7 +1400,7 @@ class MilpRouter:
         """
         # Run the MILP optimization
         milp_result = self._run_milp()
-        print(milp_result)
+
         # Reconstruct all variable matrices using generic function with registry
         mapping_variables = self._reconstruct_variables(
             milp_result, RoutingVariableType.MAPPING
@@ -1497,3 +1420,118 @@ class MilpRouter:
             qubit_movement_variables=qubit_movement_variables,
             worst_spacing=self.worst_spacing,
         )
+
+
+class IlpRouter:
+    """Integer Linear Programming router for quantum circuit qubit routing.
+
+    High-level router that handles the complete routing process including running
+    the optimisation, processing results, and extracting initial mappings and swap operations.
+    Uses MilpScipyRouter internally for the mathematical optimisation.
+
+    This class provides the main interface for quantum circuit routing and automatically
+    processes the results into usable routing information.
+
+    Attributes:
+        result: The routing result containing all variable matrices
+    """
+
+    def __init__(
+        self,
+        coupling_map: nx.DiGraph,
+        quantum_circuit: quariadne.circuit.AbstractQuantumCircuit,
+    ):
+        """Initialize the ILP router and automatically run the routing.
+
+        Args:
+            coupling_map: NetworkX DiGraph representing the physical qubit connectivity
+            quantum_circuit: Abstract quantum circuit representation to be routed
+        """
+        milp_router = MilpScipyRouter(
+            coupling_map=coupling_map,
+            quantum_circuit=quantum_circuit,
+            integrality=INTEGER_VARIABLE_INTEGRALITY,
+            fixed_mapping=None,
+        )
+        self.result = milp_router.run()
+
+    def get_initial_mapping(
+        self,
+    ) -> dict[quariadne.circuit.LogicalQubit, quariadne.circuit.PhysicalQubit]:
+        """Calculate initial mapping from mapping variables at timestep 0.
+
+        Extracts the mapping at the first timestep (t=0) and returns a dictionary
+        mapping logical qubits to physical qubits for the initial state.
+
+        Returns:
+            Dictionary mapping LogicalQubit objects to PhysicalQubit objects
+            representing the initial qubit mapping.
+        """
+        # Extract the mapping matrix at timestep 0
+        initial_timestep_mapping = self.result.mapping_variables[0]
+
+        # Find all non-zero positions (physical_idx, logical_idx) where mapping exists
+        initial_mapping_indices = np.argwhere(initial_timestep_mapping)
+
+        # Convert numpy array to Python list for iteration
+        # tolist() ensures we get Python integers rather than numpy.int64 objects
+        # which are required for the PhysicalQubit and LogicalQubit constructors
+        initial_mapping_indices_list = initial_mapping_indices.tolist()
+
+        # Build the mapping dictionary (logical → physical, matching notebook implementation)
+        mapping_dict = {}
+        for physical_idx, logical_idx in initial_mapping_indices_list:
+            physical_qubit = quariadne.circuit.PhysicalQubit(physical_idx)
+            logical_qubit = quariadne.circuit.LogicalQubit(logical_idx)
+            mapping_dict[logical_qubit] = physical_qubit
+
+        return mapping_dict
+
+    def get_inserted_swaps(self) -> dict[int, list[quariadne.circuit.PhysicalSwap]]:
+        """Extract swap operations from qubit movement variables.
+
+        TODO: Implement this operation e2e, now this is too raw.
+        Analyses the qubit movement variables to identify SWAP operations that occur
+        after each operation timestep. SWAP operations are detected by finding pairs of
+        qubits that exchange positions between physical locations.
+
+        Returns:
+            Dictionary mapping operation indices (0-based) to lists of PhysicalSwap objects.
+            Each swap pair is represented as a PhysicalSwap containing two PhysicalQubit objects.
+
+        Example:
+            {
+                0: [],  # No swaps after operation 0
+                1: [PhysicalSwap(PhysicalQubit(0), PhysicalQubit(1))],  # SWAP between physical qubits 0 and 1 after operation 1
+                2: [PhysicalSwap(PhysicalQubit(2), PhysicalQubit(3)), PhysicalSwap(PhysicalQubit(0), PhysicalQubit(4))]  # Two SWAPs after operation 2
+            }
+        """
+        swap_pairs_by_operation: defaultdict = defaultdict(list)
+
+        # Find all non-zero movement variables where actual movement occurs
+        defined_movements = np.argwhere(self.result.qubit_movement_variables)
+
+        for movement in defined_movements:
+            timestep, logical_qubit, from_qubit, to_qubit = movement.tolist()
+
+            # Only consider actual movements (not self-assignments)
+            if from_qubit != to_qubit:
+                # Convert timestep to operation index using worst_spacing division
+                # The +1 is an offset accounting for the fact that swaps happen AFTER respective operations
+                operation_index = timestep // self.result.worst_spacing + 1
+
+                # Create PhysicalSwap with proper qubit objects
+                physical_qubit_from = quariadne.circuit.PhysicalQubit(from_qubit)
+                physical_qubit_to = quariadne.circuit.PhysicalQubit(to_qubit)
+                swap_pair = quariadne.circuit.PhysicalSwap(
+                    physical_qubit_from, physical_qubit_to
+                )
+
+                # Get current operation's swap list
+                current_operation_swaps = swap_pairs_by_operation[operation_index]
+
+                # Add swap pair if not already present (avoids duplicates through PhysicalSwap equality)
+                if swap_pair not in current_operation_swaps:
+                    current_operation_swaps.append(swap_pair)
+
+        return swap_pairs_by_operation

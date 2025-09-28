@@ -24,7 +24,9 @@ The codebase follows a layered architecture:
 - NetworkX integration (mostly serving as a backbone) for graph algorithms and visualization
 
 ### Routing Engine (`quariadne/milp_router.py`)
-- **MilpRouter**: Mixed-Integer Linear Programming router for qubit mapping
+- **IlpRouter**: High-level Integer Linear Programming router for complete routing workflow
+- **MilpScipyRouter**: Low-level Mixed-Integer Linear Programming router using scipy.optimize.milp
+- **MilpRouterResult**: Pure data container for optimization results (mapping, gate execution, movement variables)
 - Handles dummy qubit addition for hardware compatibility
 - Generates constraint matrices for optimization (logical/physical uniqueness)
 - Uses scipy optimization for routing solutions
@@ -78,7 +80,7 @@ The project uses Jupyter notebooks for experimentation (see `notebook/MILP.ipynb
 
 ## MILP Implementation Notes
 
-The `MilpRouter` class implements Mixed-Integer Linear Programming for quantum circuit routing using scipy.optimize.milp. Key concepts:
+The `MilpScipyRouter` class implements Mixed-Integer Linear Programming for quantum circuit routing using scipy.optimize.milp. The `IlpRouter` class provides the high-level interface. Key concepts:
 
 ### MILP Mathematical Formulation
 - Standard form: minimize c^T x subject to A*x ≤ b, bounds, and integrality constraints

@@ -100,14 +100,13 @@ class MilpLayout(qiskit.transpiler.AnalysisPass):
 
         # Convert to internal representation and solve MILP
         quariadne_circuit = self._convert_dag_to_circuit(dag)
-        milp_router = quariadne.milp_router.MilpRouter(
+        ilp_router = quariadne.milp_router.IlpRouter(
             self.coupling_graph, quariadne_circuit
         )
-        milp_router_result = milp_router.run()
 
-        # Store result for potential use by routing pass
-        self.property_set["milp_result"] = milp_router_result
-        physical_by_logical_initial_mapping = milp_router_result.initial_mapping
+        # Store router object for potential use by routing pass
+        self.property_set["ilp_router"] = ilp_router
+        physical_by_logical_initial_mapping = ilp_router.get_initial_mapping()
 
         # Generate layout from MILP solution
         physical_qubit_indices = self._generate_physical_qubit_indices(
@@ -212,15 +211,15 @@ class MilpRouting(qiskit.transpiler.TransformationPass):
                 "Layout does not match DAG qubit count"
             )
 
-        # Retrieve MILP result from property set (populated by MilpLayout)
-        if "milp_result" not in self.property_set:
+        # Retrieve ILP router from property set (populated by MilpLayout)
+        if "ilp_router" not in self.property_set:
             raise qiskit.transpiler.TranspilerError(
                 "MilpRouting requires MilpLayout to be run first"
             )
 
         canonical_register = dag.qregs["q"]
-        milp_router_result = self.property_set["milp_result"]
-        swap_pairs_by_timestep = milp_router_result.inserted_swaps
+        ilp_router = self.property_set["ilp_router"]
+        swap_pairs_by_timestep = ilp_router.get_inserted_swaps()
 
         # Initialise layout tracking
         trivial_layout = qiskit.transpiler.Layout.generate_trivial_layout(
