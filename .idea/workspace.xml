@@ -4,11 +4,18 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="72376229-81b2-4aab-affa-e69c21520671" name="Changes" comment="Created qiskit interfaces and binding to the thing. Updated the deps for that.">
+    <list default="true" id="72376229-81b2-4aab-affa-e69c21520671" name="Changes" comment="refactored MILP router to support LP routing and added new `LpRouter` implementation. Updated entry points.">
+      <change afterPath="$PROJECT_DIR$/.gitmodules" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/QUEKO-benchmark" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/vcs.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/vcs.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/notebook/LP.ipynb" beforeDir="false" afterPath="$PROJECT_DIR$/notebook/LP.ipynb" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/quariadne/README.md" beforeDir="false" afterPath="$PROJECT_DIR$/quariadne/README.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/notebook/MILP reconstruction.ipynb" beforeDir="false" afterPath="$PROJECT_DIR$/notebook/MILP reconstruction.ipynb" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/notebook/Testing.ipynb" beforeDir="false" afterPath="$PROJECT_DIR$/notebook/Testing.ipynb" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/pyproject.toml" beforeDir="false" afterPath="$PROJECT_DIR$/pyproject.toml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/quariadne/circuit.py" beforeDir="false" afterPath="$PROJECT_DIR$/quariadne/circuit.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/quariadne/milp_router.py" beforeDir="false" afterPath="$PROJECT_DIR$/quariadne/milp_router.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/quariadne/qiskit_passes.py" beforeDir="false" afterPath="$PROJECT_DIR$/quariadne/qiskit_passes.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -29,6 +36,7 @@
       </map>
     </option>
     <option name="RECENT_GIT_ROOT_PATH" value="$PROJECT_DIR$" />
+    <option name="ROOT_SYNC" value="DONT_SYNC" />
   </component>
   <component name="GitHubPullRequestSearchHistory">{
   &quot;lastFilter&quot;: {
@@ -51,24 +59,34 @@
     <option name="hideEmptyMiddlePackages" value="true" />
     <option name="showLibraryContents" value="true" />
   </component>
-  <component name="PropertiesComponent"><![CDATA[{
-  "keyToString": {
-    "ModuleVcsDetector.initialDetectionPerformed": "true",
-    "RunOnceActivity.ShowReadmeOnStart": "true",
-    "RunOnceActivity.TerminalTabsStorage.copyFrom.TerminalArrangementManager.252": "true",
-    "RunOnceActivity.git.unshallow": "true",
-    "git-widget-placeholder": "dev",
-    "last_opened_file_path": "/home/parf/projects/work/quariadne",
-    "node.js.detected.package.eslint": "true",
-    "node.js.detected.package.tslint": "true",
-    "node.js.selected.package.eslint": "(autodetect)",
-    "node.js.selected.package.tslint": "(autodetect)",
-    "nodejs_package_manager_path": "npm",
-    "settings.editor.selected.configurable": "editor.preferences.completion",
-    "vue.rearranger.settings.migration": "true"
+  <component name="PropertiesComponent">{
+  &quot;keyToString&quot;: {
+    &quot;ModuleVcsDetector.initialDetectionPerformed&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.ShowReadmeOnStart&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.TerminalTabsStorage.copyFrom.TerminalArrangementManager.252&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.git.unshallow&quot;: &quot;true&quot;,
+    &quot;git-widget-placeholder&quot;: &quot;dev&quot;,
+    &quot;last_opened_file_path&quot;: &quot;/home/parf/projects/work/quariadne&quot;,
+    &quot;node.js.detected.package.eslint&quot;: &quot;true&quot;,
+    &quot;node.js.detected.package.tslint&quot;: &quot;true&quot;,
+    &quot;node.js.selected.package.eslint&quot;: &quot;(autodetect)&quot;,
+    &quot;node.js.selected.package.tslint&quot;: &quot;(autodetect)&quot;,
+    &quot;nodejs_package_manager_path&quot;: &quot;npm&quot;,
+    &quot;settings.editor.selected.configurable&quot;: &quot;preferences.pluginManager&quot;,
+    &quot;vue.rearranger.settings.migration&quot;: &quot;true&quot;
   }
-}]]></component>
+}</component>
   <component name="RunManager">
+    <configuration default="true" type="lua.app" factoryName="Lua Application">
+      <option name="program" value="/usr/bin/lua" />
+      <option name="file" value="" />
+      <option name="workingDir" value="127.0.0.1:8889" />
+      <option name="debuggerType" value="2" />
+      <option name="params" value="" />
+      <option name="charset" value="UTF-8" />
+      <option name="showConsole" value="true" />
+      <method v="2" />
+    </configuration>
     <configuration default="true" type="lua.app" factoryName="Lua Application">
       <option name="program" value="/usr/bin/lua" />
       <option name="file" value="" />
@@ -215,7 +233,29 @@
       <workItem from="1758815749469" duration="1230000" />
       <workItem from="1758884165475" duration="2274000" />
       <workItem from="1758901336485" duration="1046000" />
-      <workItem from="1759067789395" duration="1077000" />
+      <workItem from="1759067789395" duration="2650000" />
+      <workItem from="1759077617364" duration="2152000" />
+      <workItem from="1759159257337" duration="1643000" />
+      <workItem from="1759226694401" duration="151000" />
+      <workItem from="1759226867647" duration="26000" />
+      <workItem from="1759241865405" duration="1291000" />
+      <workItem from="1759253366219" duration="1000" />
+      <workItem from="1759313218110" duration="1815000" />
+      <workItem from="1759403339253" duration="613000" />
+      <workItem from="1759482069315" duration="3130000" />
+      <workItem from="1759595555757" duration="1987000" />
+      <workItem from="1759672532504" duration="1799000" />
+      <workItem from="1759684571697" duration="4996000" />
+      <workItem from="1759751704880" duration="6084000" />
+      <workItem from="1759767522619" duration="5000" />
+      <workItem from="1759848329043" duration="2375000" />
+      <workItem from="1759937265510" duration="6872000" />
+      <workItem from="1760254569884" duration="1189000" />
+      <workItem from="1760337435245" duration="3773000" />
+      <workItem from="1760453270301" duration="3288000" />
+      <workItem from="1760514475382" duration="2760000" />
+      <workItem from="1760616515546" duration="1696000" />
+      <workItem from="1760688168298" duration="975000" />
     </task>
     <task id="LOCAL-00001" summary="initial steup probelms fixed, and this is obviously somethign like an iintila commit">
       <option name="closed" value="true" />
@@ -413,6 +453,8 @@
     <MESSAGE value="Added the documentation for the computational DAG.&#10;&#10;Fixed some naming issues. Moved to QO backend. Created a converter for the AQC." />
     <MESSAGE value="Overhauled the typing system, and finalised the MILP router. &#10;&#10;Moved to sparse backend. Fixed issues with integer shape typings. Added dataclass for sparse matrices creation. Added to the result interface the initial mapping getter and the swap getter. Added coupling graph converter. Some typing issues are unfixed due to vendor scipy problems. Added worst spacing to the results." />
     <MESSAGE value="Created qiskit interfaces and binding to the thing. Updated the deps for that." />
-    <option name="LAST_COMMIT_MESSAGE" value="Created qiskit interfaces and binding to the thing. Updated the deps for that." />
+    <MESSAGE value="Add benchmarking notebook for connection graph analysis&#10;&#10;" />
+    <MESSAGE value="refactored MILP router to support LP routing and added new `LpRouter` implementation. Updated entry points." />
+    <option name="LAST_COMMIT_MESSAGE" value="refactored MILP router to support LP routing and added new `LpRouter` implementation. Updated entry points." />
   </component>
 </project>
