@@ -4,11 +4,8 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="72376229-81b2-4aab-affa-e69c21520671" name="Changes" comment="added new api methods to the circuit internal class">
-      <change beforePath="$PROJECT_DIR$/pyproject.toml" beforeDir="false" afterPath="$PROJECT_DIR$/pyproject.toml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/quariadne/circuit.py" beforeDir="false" afterPath="$PROJECT_DIR$/quariadne/circuit.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/quariadne/milp_router.py" beforeDir="false" afterPath="$PROJECT_DIR$/quariadne/milp_router.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/quariadne/qiskit_passes.py" beforeDir="false" afterPath="$PROJECT_DIR$/quariadne/qiskit_passes.py" afterDir="false" />
+    <list default="true" id="72376229-81b2-4aab-affa-e69c21520671" name="Changes" comment="CSplitted the ILP and LP implementations&#10;Created the LP algorithm in its fullest, and changed the solving internals.">
+      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -249,7 +246,9 @@
       <workItem from="1760514475382" duration="2760000" />
       <workItem from="1760616515546" duration="1696000" />
       <workItem from="1760688168298" duration="975000" />
-      <workItem from="1761126977866" duration="519000" />
+      <workItem from="1761126977866" duration="937000" />
+      <workItem from="1761574808239" duration="300000" />
+      <workItem from="1761750269442" duration="495000" />
     </task>
     <task id="LOCAL-00001" summary="initial steup probelms fixed, and this is obviously somethign like an iintila commit">
       <option name="closed" value="true" />
@@ -427,7 +426,15 @@
       <option name="project" value="LOCAL" />
       <updated>1761127307009</updated>
     </task>
-    <option name="localTasksCounter" value="23" />
+    <task id="LOCAL-00023" summary="another small change it ws setup">
+      <option name="closed" value="true" />
+      <created>1761127514220</created>
+      <option name="number" value="00023" />
+      <option name="presentableId" value="LOCAL-00023" />
+      <option name="project" value="LOCAL" />
+      <updated>1761127514220</updated>
+    </task>
+    <option name="localTasksCounter" value="24" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -461,8 +468,6 @@
     </option>
   </component>
   <component name="VcsManagerConfiguration">
-    <MESSAGE value="small changes for the jupyter purposes" />
-    <MESSAGE value="added circuit representing class&#10;added the circuit converter from qiskit dag" />
     <MESSAGE value="added documentation  generation to the module" />
     <MESSAGE value="added visulaisation module to the routing circuit" />
     <MESSAGE value="Massive " />
@@ -486,6 +491,8 @@
     <MESSAGE value="changed the setup of the ide" />
     <MESSAGE value="changed the notebook stubs , to accustom the API changes" />
     <MESSAGE value="added new api methods to the circuit internal class" />
-    <option name="LAST_COMMIT_MESSAGE" value="added new api methods to the circuit internal class" />
+    <MESSAGE value="another small change it ws setup" />
+    <MESSAGE value="Added small changes to the api of the cixrcuit" />
+    <option name="LAST_COMMIT_MESSAGE" value="Added small changes to the api of the cixrcuit" />
   </component>
 </project>

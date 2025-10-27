@@ -169,3 +169,64 @@ class AbstractQuantumCircuit:
 
         corresponding_abstract_circuit = cls(operations, computational_qubits)
         return corresponding_abstract_circuit
+
+    def get_two_qubit_operations(self) -> typing.List[QuantumOperation]:
+        """Extract two-qubit operations from the circuit.
+
+        Filters the circuit operations to include only two-qubit gates, which are the
+        ones that require routing due to coupling map constraints. Single-qubit operations
+        can be executed on any physical qubit without routing considerations.
+
+        Returns:
+            List of QuantumOperation objects that involve exactly two qubits.
+
+        Raises:
+            TypeError: If any operation involves more than two qubits.
+        """
+        two_qubit_gate_operations = []
+        for operation in self.operations:
+            if len(operation.qubits_participating) == 2:
+                two_qubit_gate_operations.append(operation)
+            elif len(operation.qubits_participating) > 2:
+                raise TypeError("We got much more qubits that we want!")
+
+        return two_qubit_gate_operations
+
+    def get_slice(self, start: int, end: int | None = None) -> "AbstractQuantumCircuit":
+        """Create a new circuit with operations sliced from start to end index.
+
+        Returns a new AbstractQuantumCircuit instance with operations sliced from the
+        specified start index to the end index (or to the end if not specified).
+        The qubits remain unchanged, preserving immutability.
+
+        Args:
+            start: Starting index for the slice (inclusive)
+            end: Ending index for the slice (exclusive). If None, slices to the end.
+
+        Returns:
+            New AbstractQuantumCircuit with the sliced operations.
+
+        Raises:
+            IndexError: If start index is out of range.
+        """
+        if start < 0 or start > len(self.operations):
+            raise IndexError(
+                f"Start index {start} out of range for circuit with {len(self.operations)} operations"
+            )
+
+        sliced_operations = self.operations[start:end]
+        return AbstractQuantumCircuit(sliced_operations, self.qubits)
+
+    def shift_first_operation(self) -> None:
+        """Remove the first operation from the circuit in-place.
+
+        Modifies the operations list by removing the first element.
+        This is useful for iterative processing where operations are consumed one by one.
+
+        Raises:
+            IndexError: If the circuit has no operations to shift.
+        """
+        if not self.operations:
+            raise IndexError("Cannot shift from empty circuit")
+
+        self.operations.pop(0)

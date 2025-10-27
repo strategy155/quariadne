@@ -1,4 +1,5 @@
 from typing import List, Dict, Union
+from enum import Enum
 import quariadne.computational_graph
 import quariadne.milp_router
 import quariadne.circuit
@@ -10,19 +11,38 @@ from qiskit.transpiler.preset_passmanagers.common import generate_embed_passmana
 from qiskit.transpiler import PassManager
 
 
+type MilpRouter = quariadne.milp_router.IlpRouter | quariadne.milp_router.LpRouter
+
+
+class RoutingMode(Enum):
+    """Routing mode for quantum circuit routing optimisation.
+
+    Attributes:
+        ILP: Integer Linear Program with integer constraints
+        LP: Linear Program with continuous variables and Birkhoff decomposition
+    """
+
+    ILP = "ilp"
+    LP = "lp"
+
+
 class MilpLayout(qiskit.transpiler.AnalysisPass):
-    """Layout pass using MILP optimization for initial qubit placement."""
+    """Layout pass using MILP optimisation for initial qubit placement."""
 
     def __init__(
         self,
         coupling_map: Union[qiskit.transpiler.CouplingMap, qiskit.transpiler.Target],
+        mode: RoutingMode = RoutingMode.ILP,
     ) -> None:
         """Initialise MILP layout pass with backend coupling constraints.
 
         Args:
             coupling_map: Backend coupling map defining physical qubit connectivity
+            mode: Routing mode (RoutingMode.ILP for integer program or RoutingMode.LP for linear program)
         """
         super().__init__()
+        self.mode = mode
+
         if isinstance(coupling_map, qiskit.transpiler.Target):
             self.target = coupling_map
             self.coupling_map = self.target.build_coupling_map()
@@ -87,7 +107,7 @@ class MilpLayout(qiskit.transpiler.AnalysisPass):
         return physical_qubit_indices
 
     def run(self, dag: qiskit.dagcircuit.DAGCircuit) -> None:
-        """Execute MILP optimization to determine optimal initial qubit layout."""
+        """Execute ILP/LP optimisation to determine optimal initial qubit layout."""
         if self.target is not None:
             if dag.num_qubits() > self.target.num_qubits:
                 raise qiskit.transpiler.TranspilerError(
@@ -98,31 +118,40 @@ class MilpLayout(qiskit.transpiler.AnalysisPass):
                 "Number of qubits greater than device."
             )
 
-        # Convert to internal representation and solve MILP
+        # Convert to internal representation and solve using appropriate router
         quariadne_circuit = self._convert_dag_to_circuit(dag)
-        ilp_router = quariadne.milp_router.IlpRouter(
-            self.coupling_graph, quariadne_circuit
-        )
+
+        router: MilpRouter
+        if self.mode == RoutingMode.ILP:
+            router = quariadne.milp_router.IlpRouter(
+                self.coupling_graph, quariadne_circuit
+            )
+        elif self.mode == RoutingMode.LP:
+            router = quariadne.milp_router.LpRouter(
+                self.coupling_graph, quariadne_circuit
+            )
+        else:
+            raise ValueError(f"Unknown routing mode: {self.mode}")
 
         # Store router object for potential use by routing pass
-        self.property_set["ilp_router"] = ilp_router
-        physical_by_logical_initial_mapping = ilp_router.get_initial_mapping()
+        self.property_set["router"] = router
+        physical_by_logical_initial_mapping = router.get_initial_mapping()
 
-        # Generate layout from MILP solution
+        # Generate layout from optimisation solution
         physical_qubit_indices = self._generate_physical_qubit_indices(
             physical_by_logical_initial_mapping, dag.num_qubits()
         )
 
-        # generation of the final layout
+        # Generation of the final layout
         canonical_register = dag.qregs["q"]
-        milp_layout = qiskit.transpiler.Layout.from_intlist(
+        layout = qiskit.transpiler.Layout.from_intlist(
             physical_qubit_indices, canonical_register
         )
-        self.property_set["layout"] = milp_layout
+        self.property_set["layout"] = layout
 
 
 class MilpRouting(qiskit.transpiler.TransformationPass):
-    """Routing pass using MILP optimization for SWAP insertion."""
+    """Routing pass using MILP optimisation for SWAP insertion."""
 
     def __init__(self, coupling_map: qiskit.transpiler.CouplingMap) -> None:
         """Initialise MILP routing pass with backend coupling constraints.
@@ -211,15 +240,15 @@ class MilpRouting(qiskit.transpiler.TransformationPass):
                 "Layout does not match DAG qubit count"
             )
 
-        # Retrieve ILP router from property set (populated by MilpLayout)
-        if "ilp_router" not in self.property_set:
+        # Retrieve router from property set (populated by MilpLayout)
+        if "router" not in self.property_set:
             raise qiskit.transpiler.TranspilerError(
                 "MilpRouting requires MilpLayout to be run first"
             )
 
         canonical_register = dag.qregs["q"]
-        ilp_router = self.property_set["ilp_router"]
-        swap_pairs_by_timestep = ilp_router.get_inserted_swaps()
+        router = self.property_set["router"]
+        swap_pairs_by_timestep = router.get_inserted_swaps()
 
         # Initialise layout tracking
         trivial_layout = qiskit.transpiler.Layout.generate_trivial_layout(
@@ -263,7 +292,7 @@ class MilpRouting(qiskit.transpiler.TransformationPass):
         return new_dag
 
 
-class QuariadneMilpLayoutPlugin(PassManagerStagePlugin):
+class QuariadneIlpLayoutPlugin(PassManagerStagePlugin):
     """PassManager stage plugin for MILP-based layout optimization."""
 
     def pass_manager(self, pass_manager_config, optimization_level=None):
@@ -294,21 +323,76 @@ class QuariadneMilpLayoutPlugin(PassManagerStagePlugin):
         return layout_pm
 
 
-class QuariadneMilpRoutingPlugin(PassManagerStagePlugin):
-    """PassManager stage plugin for MILP-based routing optimization."""
+class QuariadneIlpRoutingPlugin(PassManagerStagePlugin):
+    """PassManager stage plugin for MILP-based routing optimisation (ILP mode)."""
 
     def pass_manager(self, pass_manager_config, optimization_level=None):
         """Generate PassManager for MILP routing stage.
 
         Args:
             pass_manager_config: Pass manager configuration object
-            optimization_level: Optimization level (0-3)
+            optimization_level: Optimisation level (0-3)
 
         Returns:
             PassManager for MILP routing stage
         """
         routing_pm = PassManager()
         # Add MILP routing pass
+        routing_pm.append(MilpRouting(pass_manager_config.coupling_map))
+
+        return routing_pm
+
+
+class QuariadneLpLayoutPlugin(PassManagerStagePlugin):
+    """PassManager stage plugin for LP-based layout optimisation with Birkhoff decomposition."""
+
+    def pass_manager(self, pass_manager_config, optimization_level=None):
+        """Generate PassManager for LP layout stage.
+
+        Args:
+            pass_manager_config: Pass manager configuration object
+            optimization_level: Optimisation level (0-3)
+
+        Returns:
+            PassManager for LP layout stage
+        """
+        layout_pm = PassManager()
+
+        # Add LP layout pass
+        if (
+            hasattr(pass_manager_config, "target")
+            and pass_manager_config.target is not None
+        ):
+            layout_pm.append(
+                MilpLayout(pass_manager_config.target, mode=RoutingMode.LP)
+            )
+        else:
+            layout_pm.append(
+                MilpLayout(pass_manager_config.coupling_map, mode=RoutingMode.LP)
+            )
+
+        # Embed the layout using generate_embed_passmanager
+        embed_pm = generate_embed_passmanager(pass_manager_config.coupling_map)
+        layout_pm += embed_pm
+
+        return layout_pm
+
+
+class QuariadneLpRoutingPlugin(PassManagerStagePlugin):
+    """PassManager stage plugin for LP-based routing optimisation with Birkhoff decomposition."""
+
+    def pass_manager(self, pass_manager_config, optimization_level=None):
+        """Generate PassManager for LP routing stage.
+
+        Args:
+            pass_manager_config: Pass manager configuration object
+            optimization_level: Optimisation level (0-3)
+
+        Returns:
+            PassManager for LP routing stage
+        """
+        routing_pm = PassManager()
+        # Add LP routing pass
         routing_pm.append(MilpRouting(pass_manager_config.coupling_map))
 
         return routing_pm

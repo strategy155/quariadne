@@ -1,4 +1,3 @@
-import copy
 import typing
 import networkx as nx
 import numpy as np
@@ -10,8 +9,9 @@ import quariadne.circuit
 import scipy.optimize
 import scipy.sparse
 import qiskit.transpiler
+from birkhoff import birkhoff_von_neumann_decomposition
 
-DEFAULT_SHAPE_TYPE = np.uint32
+DEFAULT_SHAPE_TYPE = np.int64
 DEFAULT_CONSTRAINT_TYPE = np.float64
 
 # Optimisation coefficient constants
@@ -45,6 +45,7 @@ INTEGER_VARIABLE_INTEGRALITY = 1
 CONTINUOUS_VARIABLE_INTEGRALITY = 0
 
 type VariableShape = tuple[int, ...]
+type SwapEdge = tuple[int, int]
 
 
 class RoutingVariableType(Enum):
@@ -173,7 +174,7 @@ class MilpScipyRouter:
 
     Attributes:
         coupling_map: NetworkX DiGraph representing hardware connectivity
-        routed_circuit: Abstract quantum circuit to be routed
+        qubits: Tuple of logical qubits (including dummy qubits)
         qubit_count: Number of physical qubits available
         operations: List of two-qubit operations to be routed
         operation_count: Number of operations to route
@@ -181,59 +182,46 @@ class MilpScipyRouter:
         spaced_timesteps_count: Total timesteps in routing schedule
     """
 
-    def _add_dummy_qubits(self):
+    def _add_dummy_qubits(
+        self, qubits: tuple[quariadne.circuit.LogicalQubit, ...]
+    ) -> tuple[quariadne.circuit.LogicalQubit, ...]:
         """Add dummy logical qubits to match hardware qubit count.
 
-        Ensures the circuit has the same number of logical qubits as physical qubits
+        Ensures the number of logical qubits matches the number of physical qubits
         available on the hardware. This is required for the MILP formulation to work
         correctly as it assumes a bijective mapping between logical and physical qubits.
 
-        Raises:
-            TypeError: If the circuit has more logical qubits than available physical qubits.
-        """
-        routed_circuit_qubit_count = len(self.routed_circuit.qubits)
-        if routed_circuit_qubit_count < self.coupling_map.number_of_nodes():
-            dummy_logical_qubits = tuple(
-                quariadne.circuit.LogicalQubit(dummy_index)
-                for dummy_index in range(routed_circuit_qubit_count, self.qubit_count)
-            )
-            self.routed_circuit.qubits = (
-                self.routed_circuit.qubits + dummy_logical_qubits
-            )
-
-        elif routed_circuit_qubit_count > self.coupling_map.number_of_nodes():
-            raise TypeError("We got more qubits than we can route!")
-
-    def _get_two_qubit_operations(self):
-        """Extract two-qubit operations from the quantum circuit.
-
-        Filters the circuit operations to include only two-qubit gates, which are the
-        ones that require routing due to coupling map constraints. Single-qubit operations
-        can be executed on any physical qubit without routing considerations.
+        Args:
+            qubits: Tuple of logical qubits to extend with dummy qubits
 
         Returns:
-            List of QuantumOperation objects that involve exactly two qubits.
+            Extended tuple of logical qubits including dummy qubits
 
         Raises:
-            TypeError: If any operation involves more than two qubits.
+            TypeError: If more logical qubits than available physical qubits.
         """
-        two_qubit_gate_operations = []
-        for operation in self.routed_circuit.operations:
-            if len(operation.qubits_participating) == 2:
-                two_qubit_gate_operations.append(operation)
-            elif len(operation.qubits_participating) > 2:
-                raise TypeError("We got much more qubits that we want!")
+        qubit_count = len(qubits)
+        if qubit_count < self.coupling_map.number_of_nodes():
+            dummy_logical_qubits = tuple(
+                quariadne.circuit.LogicalQubit(dummy_index)
+                for dummy_index in range(qubit_count, self.qubit_count)
+            )
+            return qubits + dummy_logical_qubits
 
-        return two_qubit_gate_operations
+        elif qubit_count > self.coupling_map.number_of_nodes():
+            raise TypeError("We got more qubits than we can route!")
+
+        return qubits
 
     def __init__(
         self,
         coupling_map: nx.DiGraph,
-        quantum_circuit: quariadne.circuit.AbstractQuantumCircuit,
+        two_qubit_operations: list[quariadne.circuit.QuantumOperation],
+        qubits: tuple[quariadne.circuit.LogicalQubit, ...],
         integrality=INTEGER_VARIABLE_INTEGRALITY,
         fixed_mapping: np.ndarray | None = None,
     ):
-        """Initialize the MILP router with hardware topology and quantum circuit.
+        """Initialize the MILP router with hardware topology, operations, and qubits.
 
         Sets up all necessary data structures for the MILP formulation including:
         - Variable shapes and offsets for mapping, gate execution, and qubit movement
@@ -243,30 +231,30 @@ class MilpScipyRouter:
         Args:
             coupling_map: NetworkX DiGraph representing the physical qubit connectivity
                          and allowed two-qubit gate operations on the hardware.
-            quantum_circuit: Abstract quantum circuit representation containing logical
-                           qubits and operations to be routed onto the hardware.
+            two_qubit_operations: List of two-qubit operations to be routed.
+            qubits: Tuple of logical qubits to be mapped to physical qubits.
             integrality: Integrality constraint value for decision variables. Use
                         INTEGER_VARIABLE_INTEGRALITY (1) for MILP or 0 for LP relaxation.
             fixed_mapping: Optional numpy array specifying fixed mapping constraints.
                           Should have shape matching the mapping variables format.
         """
+
         self.integrality = integrality
         self.fixed_mapping = fixed_mapping
         self.coupling_map = coupling_map
         self.qubit_count = coupling_map.number_of_nodes()
 
-        # copy is needed because we will modify the initial circuit several times.
-        self.routed_circuit = copy.deepcopy(quantum_circuit)
-
-        # calculating the parameters of the circuit
-        # worst spacing is the token swapping worst case $n^2$,
-        # the tokens are calculated before dummy qubits addition
-        self.worst_spacing = len(self.routed_circuit.qubits) ** 2
-
-        self._add_dummy_qubits()
-
-        self.operations = self._get_two_qubit_operations()
+        # Store operations directly
+        self.operations = two_qubit_operations
         self.operation_count = len(self.operations)
+
+        # Calculate worst spacing before adding dummy qubits
+        # worst spacing is the token swapping worst case n^2
+        self.worst_spacing = len(qubits) - 1
+
+        # Add dummy qubits to match hardware qubit count
+        self.qubits = self._add_dummy_qubits(qubits)
+
         self.spaced_timesteps_count = self.operation_count * self.worst_spacing
 
         # calculating the shapes of the decision variables
@@ -416,7 +404,7 @@ class MilpScipyRouter:
         # Iterate through all timesteps in the routing schedule
         for timestep in range(self.spaced_timesteps_count):
             # For each logical qubit, ensure it maps to exactly one physical qubit
-            for logical_qubit in self.routed_circuit.qubits:
+            for logical_qubit in self.qubits:
                 for physical_qubit in self.coupling_map.nodes:
                     # Build multidimensional index for mapping variable
                     logical_by_physical_index = (
@@ -460,7 +448,7 @@ class MilpScipyRouter:
         for timestep in range(self.spaced_timesteps_count):
             # For each physical qubit, ensure it hosts exactly one logical qubit
             for physical_qubit in self.coupling_map.nodes:
-                for logical_qubit in self.routed_circuit.qubits:
+                for logical_qubit in self.qubits:
                     # Build multidimensional index for mapping variable
                     physical_by_logical_index = (
                         timestep,
@@ -840,7 +828,7 @@ class MilpScipyRouter:
             previous_timestep = timestep - 1
 
             # For each logical qubit and each physical qubit position
-            for logical_qubit in self.routed_circuit.qubits:
+            for logical_qubit in self.qubits:
                 for physical_qubit in self.coupling_map.nodes:
                     # Current timestep mapping variable gets coefficient +1
                     current_mapping_multi_index = (
@@ -926,7 +914,7 @@ class MilpScipyRouter:
         # Include all timesteps to match notebook implementation
         for timestep in range(self.spaced_timesteps_count):
             # For each logical qubit and each physical qubit position
-            for logical_qubit in self.routed_circuit.qubits:
+            for logical_qubit in self.qubits:
                 for physical_qubit in self.coupling_map.nodes:
                     # Current timestep mapping variable gets coefficient +1
                     current_mapping_multi_index = (
@@ -1106,7 +1094,7 @@ class MilpScipyRouter:
             )
 
             # Get all logical qubits that are NOT participating in this operation
-            all_logical_qubits = set(self.routed_circuit.qubits)
+            all_logical_qubits = set(self.qubits)
             non_participating_qubits = all_logical_qubits - participating_qubits
 
             # For each physical edge in the coupling map
@@ -1195,7 +1183,6 @@ class MilpScipyRouter:
 
             # Get the fixed mapping for this timestep
             timestep_fixed_mapping = self.fixed_mapping[operation_index]
-            print(timestep_fixed_mapping.shape, self.fixed_mapping.shape)
             # Find all non-zero positions in the fixed mapping for this timestep
             fixed_mapping_indices = np.argwhere(timestep_fixed_mapping)
             for physical_idx, logical_idx in fixed_mapping_indices:
@@ -1206,7 +1193,6 @@ class MilpScipyRouter:
                     logical_idx,
                 )
 
-                print(mapping_multi_index)
                 # Convert to flat index for coefficient matrix
                 flattened_mapping_index = np.ravel_multi_index(
                     mapping_multi_index, self.mapping_variables_shape
@@ -1225,7 +1211,6 @@ class MilpScipyRouter:
             fixed_mapping_sparse_data, constraint_index
         )
 
-        print(fixed_mapping_constraint)
         return fixed_mapping_constraint
 
     def _generate_all_constraints(self):
@@ -1280,7 +1265,7 @@ class MilpScipyRouter:
         # Iterate through all timesteps in the routing schedule
         for spaced_timestep in range(self.spaced_timesteps_count):
             # For each logical qubit and each possible qubit movement
-            for logical_qubit in self.routed_circuit.qubits:
+            for logical_qubit in self.qubits:
                 for from_physical_qubit in self.coupling_map.nodes:
                     for to_physical_qubit in self.coupling_map.nodes:
                         # Only penalise actual movement (not self-mapping)
@@ -1346,15 +1331,15 @@ class MilpScipyRouter:
             bounds=variables_bounds,
             constraints=constraints,
         )
-        print(milp_result)
+
         # TODO: Round solution to handle numerical precision issues
         # This may be removed when transitioning to scipy.optimize.linprog
         # TODO: fix typing issue
         if self.integrality == INTEGER_VARIABLE_INTEGRALITY:
             milp_result.x = np.rint(milp_result.x)  # type: ignore
         elif self.integrality == CONTINUOUS_VARIABLE_INTEGRALITY:
-            close_to_zero_mask = np.isclose(milp_result.x, 0)
-            milp_result.x[close_to_zero_mask] = 0
+            close_to_zero_mask = np.isclose(milp_result.x, 0)  # type: ignore
+            milp_result.x[close_to_zero_mask] = 0  # type: ignore
 
         return milp_result
 
@@ -1447,9 +1432,13 @@ class IlpRouter:
             coupling_map: NetworkX DiGraph representing the physical qubit connectivity
             quantum_circuit: Abstract quantum circuit representation to be routed
         """
+        two_qubit_operations = quantum_circuit.get_two_qubit_operations()
+        qubits = quantum_circuit.qubits
+
         milp_router = MilpScipyRouter(
             coupling_map=coupling_map,
-            quantum_circuit=quantum_circuit,
+            two_qubit_operations=two_qubit_operations,
+            qubits=qubits,
             integrality=INTEGER_VARIABLE_INTEGRALITY,
             fixed_mapping=None,
         )
@@ -1535,3 +1524,407 @@ class IlpRouter:
                     current_operation_swaps.append(swap_pair)
 
         return swap_pairs_by_operation
+
+
+class LpRouter:
+    """Linear Programming router for quantum circuit qubit routing using iterative mapping recovery.
+
+    This router uses continuous variables (integrality=0) instead of integer variables and employs
+    an iterative approach with Birkhoff-von Neumann decomposition to extract permutation mappings
+    from doubly stochastic matrices. The process follows a bootstrap phase followed by iterative
+    mapping recovery to generate a full scheme of mappings and sequence of swaps.
+
+    Attributes:
+        coupling_map: NetworkX DiGraph representing physical qubit connectivity
+        qubits: Tuple of logical qubits to be routed
+        two_qubit_operations: List of two-qubit operations to be routed
+        mappings: List of extracted mappings from iterative process
+        permutations: List of permutation matrices corresponding to mappings
+        swaps_by_operation: Dictionary mapping operation indices to swap lists
+    """
+
+    def __init__(
+        self,
+        coupling_map: nx.DiGraph,
+        quantum_circuit: quariadne.circuit.AbstractQuantumCircuit,
+    ):
+        """Initialize the LP router and automatically run the routing.
+
+        Args:
+            coupling_map: NetworkX DiGraph representing the physical qubit connectivity
+            quantum_circuit: Abstract quantum circuit representation to be routed
+        """
+        self.coupling_map = coupling_map
+        self.qubits = quantum_circuit.qubits
+        self.two_qubit_operations = quantum_circuit.get_two_qubit_operations()
+        self.mappings: list[
+            dict[quariadne.circuit.LogicalQubit, quariadne.circuit.PhysicalQubit]
+        ] = []
+        self.permutations: list[np.ndarray] = []
+        self.swaps_by_operation: dict[int, list[quariadne.circuit.PhysicalSwap]] = {}
+
+        # Run routing automatically
+        self._run()
+
+    def _get_initial_permutation(self) -> np.ndarray:
+        """Get initial permutation using LP bootstrap phase.
+
+        Uses Linear Programming (integrality=0) without constraints to get the initial
+        mapping through optimisation. Extracts a compatible permutation using Birkhoff decomposition.
+
+        Returns:
+            Initial permutation matrix
+        """
+        # Get first two-qubit operation
+        first_two_qubit_operation = self.two_qubit_operations[0]
+
+        # Run LP optimisation with continuous variables and no fixed mapping
+        lp_router = MilpScipyRouter(
+            coupling_map=self.coupling_map,
+            two_qubit_operations=self.two_qubit_operations,
+            qubits=self.qubits,
+            integrality=CONTINUOUS_VARIABLE_INTEGRALITY,
+            fixed_mapping=None,
+        )
+        lp_result = lp_router.run()
+
+        # Extract compatible permutation for first two-qubit operation
+        bootstrap_mapping_variables = lp_result.mapping_variables[0]
+        initial_permutation = self._extract_permutation_for_operation(
+            bootstrap_mapping_variables, first_two_qubit_operation
+        )
+
+        return initial_permutation
+
+    def _get_next_permutation(
+        self,
+        current_permutation: np.ndarray,
+        current_operation: quariadne.circuit.QuantumOperation,
+        remaining_operations: list[quariadne.circuit.QuantumOperation],
+    ) -> np.ndarray:
+        """Get next permutation by running LP on remaining operations with fixed current permutation.
+
+        Args:
+            current_permutation: Current permutation matrix to fix as constraint
+            current_operation: Operation that needs to be made executable
+            remaining_operations: List of remaining two-qubit operations to route
+
+        Returns:
+            Next permutation matrix compatible with the current operation
+        """
+        # Run LP on remaining operations with current permutation fixed
+        fixed_permutation_array = current_permutation[np.newaxis, ...]
+
+        lp_router = MilpScipyRouter(
+            coupling_map=self.coupling_map,
+            two_qubit_operations=remaining_operations,
+            qubits=self.qubits,
+            integrality=CONTINUOUS_VARIABLE_INTEGRALITY,
+            fixed_mapping=fixed_permutation_array,
+        )
+        lp_result = lp_router.run()
+
+        # Extract next permutation at first operation timestep
+        next_mapping_timestep = lp_result.worst_spacing
+        next_mapping_variables = lp_result.mapping_variables[next_mapping_timestep]
+
+        next_permutation = self._extract_permutation_for_operation(
+            next_mapping_variables, current_operation
+        )
+        return next_permutation
+
+    def _create_physical_to_logical_mapping(
+        self, permutation_matrix: np.ndarray
+    ) -> dict[quariadne.circuit.PhysicalQubit, quariadne.circuit.LogicalQubit]:
+        """Create a mapping from physical to logical qubits from a permutation matrix.
+
+        Args:
+            permutation_matrix: 2D numpy array representing a permutation matrix
+
+        Returns:
+            Dictionary mapping PhysicalQubit objects to LogicalQubit objects.
+        """
+        physical_to_logical_mapping = {}
+        for physical_idx, logical_idx in np.argwhere(permutation_matrix):
+            physical_qubit = quariadne.circuit.PhysicalQubit(physical_idx)
+            logical_qubit = quariadne.circuit.LogicalQubit(logical_idx)
+            physical_to_logical_mapping[physical_qubit] = logical_qubit
+        return physical_to_logical_mapping
+
+    def _is_compatible_with_operation(
+        self,
+        permutation_matrix: np.ndarray,
+        operation: quariadne.circuit.QuantumOperation,
+    ) -> bool:
+        """Check if a permutation matrix is compatible with a two-qubit operation.
+
+        Args:
+            permutation_matrix: 2D numpy array representing a permutation matrix
+            operation: QuantumOperation that requires connectivity between its participating qubits
+
+        Returns:
+            True if the permutation allows the operation's qubits to be connected, False otherwise.
+        """
+        # Create the mapping from physical to logical qubits for this permutation
+        physical_to_logical_mapping = self._create_physical_to_logical_mapping(
+            permutation_matrix
+        )
+
+        # Relabel the coupling map to get logical connectivity
+        logical_connectivity = nx.relabel_nodes(
+            self.coupling_map, physical_to_logical_mapping
+        )
+
+        # Check if the operation's participating qubits are connected
+        left_logical, right_logical = operation.qubits_participating
+
+        return logical_connectivity.has_edge(left_logical, right_logical)
+
+    def _build_mapping_from_permutation(
+        self, permutation_matrix: np.ndarray
+    ) -> dict[quariadne.circuit.LogicalQubit, quariadne.circuit.PhysicalQubit]:
+        """Build a logical-to-physical mapping dictionary from a permutation matrix.
+
+        Args:
+            permutation_matrix: 2D numpy array representing a permutation matrix
+
+        Returns:
+            Dictionary mapping LogicalQubit objects to PhysicalQubit objects.
+        """
+        mapping_dict = {}
+        for physical_idx, logical_idx in np.argwhere(permutation_matrix):
+            physical_qubit = quariadne.circuit.PhysicalQubit(physical_idx)
+            logical_qubit = quariadne.circuit.LogicalQubit(logical_idx)
+            mapping_dict[logical_qubit] = physical_qubit
+        return mapping_dict
+
+    def _extract_permutation_for_operation(
+        self,
+        mapping_variables: np.ndarray,
+        operation: quariadne.circuit.QuantumOperation,
+    ) -> np.ndarray:
+        """Extract permutation matrix for a given operation using Birkhoff decomposition.
+
+        Uses Birkhoff-von Neumann decomposition to convert doubly stochastic matrix to
+        permutations and selects the first permutation that satisfies connectivity
+        requirements for the given operation.
+
+        Args:
+            mapping_variables: 2D numpy array representing doubly stochastic mapping matrix
+            operation: QuantumOperation that requires connectivity checking
+
+        Returns:
+            2D numpy array representing the permutation matrix.
+
+        Raises:
+            ValueError: If no compatible permutation found for the operation.
+        """
+        # Perform Birkhoff-von Neumann decomposition
+        coefficient_matrix_pairs = birkhoff_von_neumann_decomposition(mapping_variables)
+
+        # Sort permutations by coefficient in descending order
+        sorted_permutations = sorted(
+            coefficient_matrix_pairs,
+            key=lambda coefficient_matrix_pair: coefficient_matrix_pair[0],
+            reverse=True,
+        )
+
+        # Find the first permutation that satisfies connectivity requirements
+        for coefficient, permutation_matrix in sorted_permutations:
+            if self._is_compatible_with_operation(permutation_matrix, operation):
+                return permutation_matrix
+
+        # If no compatible permutation found, raise an error
+        raise ValueError(f"No compatible permutation found for operation {operation}")
+
+    def _mapping_to_permutation_matrix(
+        self,
+        mapping: dict[quariadne.circuit.LogicalQubit, quariadne.circuit.PhysicalQubit],
+    ) -> np.ndarray:
+        """Convert logical-to-physical mapping dictionary to permutation matrix.
+
+        Args:
+            mapping: Dictionary mapping LogicalQubit objects to PhysicalQubit objects
+
+        Returns:
+            2D numpy array representing the permutation matrix
+        """
+        qubit_count = len(mapping)
+        permutation_matrix = np.zeros((qubit_count, qubit_count))
+
+        for logical_qubit, physical_qubit in mapping.items():
+            permutation_matrix[physical_qubit.index, logical_qubit.index] = 1.0
+
+        return permutation_matrix
+
+    def _accumulate_edge_swaps(
+        self, qubit_movement_variables: np.ndarray
+    ) -> dict[SwapEdge, float]:
+        """Accumulate movement values for each edge from qubit movement variables.
+
+        Args:
+            qubit_movement_variables: Array of qubit movement variables from router result
+
+        Returns:
+            Dictionary mapping edge tuples (from_qubit, to_qubit) to accumulated movement values
+        """
+        swap_edges: dict[SwapEdge, float] = defaultdict(float)
+        defined_movements = np.argwhere(qubit_movement_variables)
+
+        for movement in defined_movements:
+            timestep, logical_qubit, from_qubit, to_qubit = movement.tolist()
+
+            # Only consider actual movements (not self-assignments)
+            if from_qubit != to_qubit:
+                edge_key = (from_qubit, to_qubit)
+                movement_value = qubit_movement_variables[
+                    timestep, logical_qubit, from_qubit, to_qubit
+                ]
+                swap_edges[edge_key] += movement_value
+
+        return swap_edges
+
+    def _create_swaps_from_edges(
+        self, swap_edges: dict[SwapEdge, float]
+    ) -> list[quariadne.circuit.PhysicalSwap]:
+        """Create list of PhysicalSwap objects from accumulated edge movements.
+
+        Args:
+            swap_edges: Dictionary mapping edge tuples to accumulated movement values
+
+        Returns:
+            List of PhysicalSwap objects for movements approximately equal to 1.0
+        """
+        swaps = []
+        for (from_qubit, to_qubit), accumulated_movement_value in swap_edges.items():
+            # Only include movements approximately equal to 1.0
+            if np.isclose(accumulated_movement_value, 1.0):
+                physical_qubit_from = quariadne.circuit.PhysicalQubit(from_qubit)
+                physical_qubit_to = quariadne.circuit.PhysicalQubit(to_qubit)
+                swap = quariadne.circuit.PhysicalSwap(
+                    physical_qubit_from, physical_qubit_to
+                )
+
+                # Add swap if not already present (avoids duplicates through PhysicalSwap equality)
+                if swap not in swaps:
+                    swaps.append(swap)
+
+        return swaps
+
+    def _get_swaps_between_two_permutations(
+        self,
+        previous_permutation: np.ndarray,
+        current_permutation: np.ndarray,
+        previous_operation: quariadne.circuit.QuantumOperation,
+        current_operation: quariadne.circuit.QuantumOperation,
+    ) -> list[quariadne.circuit.PhysicalSwap]:
+        """Calculate swap operations between two consecutive permutations.
+
+        Runs a constrained routing problem with exactly two operations and two fixed
+        permutations to recover the minimal sequence of swaps needed to transition
+        between them.
+
+        Args:
+            previous_permutation: Permutation matrix for the previous operation
+            current_permutation: Permutation matrix for the current operation
+            previous_operation: The previous quantum operation
+            current_operation: The current quantum operation
+
+        Returns:
+            List of PhysicalSwap operations needed to transition between permutations
+        """
+        two_step_permutations = np.array([previous_permutation, current_permutation])
+        two_step_operations = [previous_operation, current_operation]
+        # Run router with both operations and fixed mappings
+        lp_router = MilpScipyRouter(
+            coupling_map=self.coupling_map,
+            two_qubit_operations=two_step_operations,
+            qubits=self.qubits,
+            integrality=CONTINUOUS_VARIABLE_INTEGRALITY,
+            fixed_mapping=two_step_permutations,
+        )
+        lp_result = lp_router.run()
+
+        # Phase 1: Accumulate edge swaps
+        swap_edges = self._accumulate_edge_swaps(lp_result.qubit_movement_variables)
+
+        # Phase 2: Create list of swaps
+        swaps = self._create_swaps_from_edges(swap_edges)
+
+        return swaps
+
+    def _run(self) -> None:
+        """Run the iterative LP routing process to generate sequence of mappings and swaps.
+
+        Implements the iterative routing algorithm:
+        1. Bootstrap: get initial permutation using LP and Birkhoff decomposition
+        2. Iterate through two-qubit operations:
+           - Check compatibility with current permutation
+           - If incompatible, run LP on remaining operations to get next permutation
+           - Calculate swaps between previous and current permutation
+           - Pop the processed operation
+        """
+        # Make a working copy of operations list
+        remaining_operations = self.two_qubit_operations.copy()
+
+        # Bootstrap phase: get initial permutation
+        current_permutation = self._get_initial_permutation()
+        initial_mapping = self._build_mapping_from_permutation(current_permutation)
+        self.mappings = [initial_mapping]
+        self.permutations = [current_permutation]
+
+        # Iterative phase: process operations one by one
+        for operation_index in range(1, len(self.two_qubit_operations)):
+            routed_operation = self.two_qubit_operations[operation_index]
+            previous_operation = self.two_qubit_operations[operation_index - 1]
+            previous_permutation = current_permutation
+
+            # Check if operation is incompatible with current permutation
+            if not self._is_compatible_with_operation(
+                current_permutation, routed_operation
+            ):
+                # Two-qubit operation is not executable, get next permutation
+                next_permutation = self._get_next_permutation(
+                    current_permutation, routed_operation, remaining_operations
+                )
+                next_mapping = self._build_mapping_from_permutation(next_permutation)
+
+                # Calculate swaps between previous and next permutation
+                swaps = self._get_swaps_between_two_permutations(
+                    previous_permutation,
+                    next_permutation,
+                    previous_operation,
+                    routed_operation,
+                )
+                self.swaps_by_operation[operation_index] = swaps
+
+                # Update current permutation and add mapping to list
+                self.mappings.append(next_mapping)
+                self.permutations.append(next_permutation)
+                current_permutation = next_permutation
+            else:
+                # Operation is compatible, no swaps needed
+                self.swaps_by_operation[operation_index] = []
+
+            # Pop the first operation from remaining operations
+            remaining_operations.pop(0)
+
+    def get_initial_mapping(
+        self,
+    ) -> dict[quariadne.circuit.LogicalQubit, quariadne.circuit.PhysicalQubit]:
+        """Get initial mapping from the first permutation.
+
+        Returns:
+            Dictionary mapping LogicalQubit objects to PhysicalQubit objects
+            representing the initial qubit mapping.
+        """
+        return self.mappings[0]
+
+    def get_inserted_swaps(self) -> dict[int, list[quariadne.circuit.PhysicalSwap]]:
+        """Get swap operations inserted after each operation.
+
+        Returns:
+            Dictionary mapping operation indices to lists of PhysicalSwap objects.
+            Each swap list contains swaps needed after executing the operation at that index.
+        """
+        return self.swaps_by_operation

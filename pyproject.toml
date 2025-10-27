@@ -17,10 +17,14 @@ dependencies = [
 ]
 
 [project.entry-points."qiskit.transpiler.layout"]
-"quariadne_milp" = "quariadne.qiskit_passes:QuariadneMilpLayoutPlugin"
+"quariadne_ilp" = "quariadne.qiskit_passes:QuariadneIlpLayoutPlugin"
+"quariadne_lp" = "quariadne.qiskit_passes:QuariadneLpLayoutPlugin"
+
 
 [project.entry-points."qiskit.transpiler.routing"]
-"quariadne_milp" = "quariadne.qiskit_passes:QuariadneMilpRoutingPlugin"
+"quariadne_ilp" = "quariadne.qiskit_passes:QuariadneIlpRoutingPlugin"
+"quariadne_lp" = "quariadne.qiskit_passes:QuariadneLpRoutingPlugin"
+
 
 [tool.uv]
 package = true
