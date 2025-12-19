@@ -1,21 +1,23 @@
 import typing
 import networkx as nx
 import numpy as np
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
 from enum import Enum
-from collections import defaultdict
 
 import quariadne.circuit
 import scipy.optimize
 import scipy.sparse
 import qiskit.transpiler
-from birkhoff import birkhoff_von_neumann_decomposition
+
+if typing.TYPE_CHECKING:
+    from quariadne.routers import OperationEdgeAssignment
 
 DEFAULT_SHAPE_TYPE = np.int64
 DEFAULT_CONSTRAINT_TYPE = np.float64
 
 # Optimisation coefficient constants
 QUBIT_MOVEMENT_PENALTY_COEFFICIENT = 0.5
+MILP_SOLVER_TIMEOUT_SECONDS = 3600
 
 # Constraint name constants
 LOGICAL_UNIQUENESS_CONSTRAINT = "logical_uniqueness_constraint"
@@ -30,6 +32,10 @@ FLOW_CONDITION_OUT_CONSTRAINT = "flow_condition_out_constraint"
 GATE_EXECUTION_SWAP_CONSTRAINT = "gate_execution_swap_constraint"
 NON_GATE_SWAP_CONSTRAINT = "non_gate_swap_constraint"
 FIXED_MAPPING_CONSTRAINT = "fixed_mapping_constraint"
+FIXED_EDGES_CONSTRAINT = "fixed_edges_constraint"
+GATE_EXECUTION_LAYER_EDGE_UNIQUENESS_CONSTRAINT = (
+    "gate_execution_layer_edge_uniqueness_constraint"
+)
 
 # Constraint bound value constants
 ONE_EQUALITY_CONSTRAINT_BOUND = 1
@@ -46,6 +52,7 @@ CONTINUOUS_VARIABLE_INTEGRALITY = 0
 
 type VariableShape = tuple[int, ...]
 type SwapEdge = tuple[int, int]
+type GateLayer = tuple[quariadne.circuit.QuantumOperation, ...]
 
 
 class RoutingVariableType(Enum):
@@ -113,6 +120,19 @@ class MilpRouterResult:
     worst_spacing: int
 
 
+@dataclass
+class HiGHSSolverOptions:
+    """Configuration options for the HiGHS MILP solver.
+
+    Attributes:
+        time_limit: Maximum solver runtime in seconds. If the solver exceeds
+                   this limit, it returns the best solution found so far.
+    """
+
+    time_limit: float
+    write_model_to_file: bool
+
+
 def get_coupling_graph(coupling_map: qiskit.transpiler.CouplingMap) -> nx.DiGraph:
     """Convert IBM coupling map to NetworkX DiGraph coupling map.
 
@@ -158,6 +178,69 @@ def get_coupling_graph(coupling_map: qiskit.transpiler.CouplingMap) -> nx.DiGrap
     coupling_graph_nx.add_edges_from(physical_qubits_connections)
 
     return coupling_graph_nx
+
+
+def create_gate_layers(
+    operations: list[quariadne.circuit.QuantumOperation],
+    coupling_map: nx.Graph,
+) -> list[GateLayer]:
+    """Create gate layers by grouping operations with non-conflicting qubits.
+
+    Groups two-qubit operations into layers where operations in the same layer
+    can execute in parallel (no qubit conflicts). Uses a greedy algorithm that
+    iterates through operations in order and adds each operation to the current
+    layer if no qubit conflict exists, otherwise starts a new layer.
+
+    Additionally enforces that the layer size does not exceed the maximum
+    matching size of the coupling map, which represents the maximum number of
+    two-qubit gates that can execute simultaneously on the hardware.
+
+    Args:
+        operations: List of two-qubit operations to be grouped into layers
+        coupling_map: Physical qubit connectivity graph (directed or undirected)
+
+    Returns:
+        List of gate layers, where each layer contains operations that can
+        execute in parallel.
+    """
+    # Calculate maximum matching size for the coupling map
+    # This represents the maximum number of two-qubit gates that can execute
+    # simultaneously on the hardware
+    coupling_map_undirected = coupling_map.to_undirected()
+    maximum_matching = nx.algorithms.matching.maximal_matching(coupling_map_undirected)
+    max_matching_size = len(maximum_matching)
+
+    gate_layers: list[GateLayer] = []
+    current_layer: list[quariadne.circuit.QuantumOperation] = []
+    current_layer_qubits: set[quariadne.circuit.LogicalQubit] = set()
+
+    for operation in operations:
+        operation_qubits = set(operation.qubits_participating)
+
+        # Check if operation qubits conflict with current layer qubits, or
+        # if adding this operation would exceed the maximum matching constraint
+        qubit_conflict_exists = bool(current_layer_qubits & operation_qubits)
+        exceeds_max_matching = len(current_layer) >= max_matching_size
+
+        if qubit_conflict_exists or exceeds_max_matching:
+            # Conflict exists or max matching exceeded, start new layer
+            # Convert list to immutable tuple for hashable GateLayer type
+            completed_layer: GateLayer = tuple(current_layer)
+            gate_layers.append(completed_layer)
+            current_layer = [operation]
+            current_layer_qubits = operation_qubits
+        else:
+            # No conflict and within max matching limit, add to current layer
+            current_layer.append(operation)
+            current_layer_qubits.update(operation_qubits)
+
+    # Add the last layer if not empty
+    if current_layer:
+        # Convert list to immutable tuple for hashable GateLayer type
+        final_layer: GateLayer = tuple(current_layer)
+        gate_layers.append(final_layer)
+
+    return gate_layers
 
 
 class MilpScipyRouter:
@@ -216,12 +299,13 @@ class MilpScipyRouter:
     def __init__(
         self,
         coupling_map: nx.DiGraph,
-        two_qubit_operations: list[quariadne.circuit.QuantumOperation],
+        gate_layers: list[GateLayer],
         qubits: tuple[quariadne.circuit.LogicalQubit, ...],
         integrality=INTEGER_VARIABLE_INTEGRALITY,
         fixed_mapping: np.ndarray | None = None,
+        fixed_edges: list[list["OperationEdgeAssignment"]] | None = None,
     ):
-        """Initialize the MILP router with hardware topology, operations, and qubits.
+        """Initialize the MILP router with hardware topology, gate layers, and qubits.
 
         Sets up all necessary data structures for the MILP formulation including:
         - Variable shapes and offsets for mapping, gate execution, and qubit movement
@@ -231,31 +315,42 @@ class MilpScipyRouter:
         Args:
             coupling_map: NetworkX DiGraph representing the physical qubit connectivity
                          and allowed two-qubit gate operations on the hardware.
-            two_qubit_operations: List of two-qubit operations to be routed.
+            gate_layers: Pre-computed gate layers where operations in each layer can
+                        execute in parallel (no qubit conflicts).
             qubits: Tuple of logical qubits to be mapped to physical qubits.
             integrality: Integrality constraint value for decision variables. Use
                         INTEGER_VARIABLE_INTEGRALITY (1) for MILP or 0 for LP relaxation.
             fixed_mapping: Optional numpy array specifying fixed mapping constraints.
                           Should have shape matching the mapping variables format.
+            fixed_edges: Optional list of edge assignment lists per gate layer. Each element
+                        is a list of (operation_index, edge_index) tuples for that layer.
+                        Position i in the list corresponds to gate_layers[i].
         """
 
         self.integrality = integrality
         self.fixed_mapping = fixed_mapping
+        self.fixed_edges = fixed_edges
         self.coupling_map = coupling_map
         self.qubit_count = coupling_map.number_of_nodes()
 
-        # Store operations directly
-        self.operations = two_qubit_operations
+        # Store gate layers and derive operations list
+        self.gate_layers = gate_layers
+        self.layer_count = len(self.gate_layers)
+
+        # Flatten layers to get operations list
+        self.operations = [
+            operation for layer in self.gate_layers for operation in layer
+        ]
         self.operation_count = len(self.operations)
 
         # Calculate worst spacing before adding dummy qubits
         # worst spacing is the token swapping worst case n^2
-        self.worst_spacing = len(qubits) - 1
+        self.worst_spacing = len(qubits)
 
         # Add dummy qubits to match hardware qubit count
         self.qubits = self._add_dummy_qubits(qubits)
 
-        self.spaced_timesteps_count = self.operation_count * self.worst_spacing
+        self.spaced_timesteps_count = self.layer_count * self.worst_spacing
 
         # calculating the shapes of the decision variables
         self.qubit_movement_shape: VariableShape = (
@@ -270,7 +365,6 @@ class MilpScipyRouter:
             self.qubit_count,
         )
         self.gate_execution_variables_shape: VariableShape = (
-            self.spaced_timesteps_count,
             self.operation_count,
             self.coupling_map.number_of_edges(),
         )
@@ -325,6 +419,7 @@ class MilpScipyRouter:
             LOGICAL_UNIQUENESS_CONSTRAINT: self._generate_logical_uniqueness_constraint,
             PHYSICAL_UNIQUENESS_CONSTRAINT: self._generate_physical_uniqueness_constraint,
             GATE_EXECUTION_CONSTRAINT: self._generate_gate_execution_constraint,
+            GATE_EXECUTION_LAYER_EDGE_UNIQUENESS_CONSTRAINT: self._generate_gate_execution_layer_edge_uniqueness_constraint,
             GATE_MAPPING_CONSTRAINT: self._generate_gate_mapping_constraint,
             GATE_MAPPING_LEFT_QUBIT_CONSTRAINT: self._generate_gate_mapping_left_qubit_constraint,
             GATE_MAPPING_RIGHT_QUBIT_CONSTRAINT: self._generate_gate_mapping_right_qubit_constraint,
@@ -334,6 +429,7 @@ class MilpScipyRouter:
             GATE_EXECUTION_SWAP_CONSTRAINT: self._generate_gate_execution_swap_constraint,
             NON_GATE_SWAP_CONSTRAINT: self._generate_non_gate_swap_constraint,
             FIXED_MAPPING_CONSTRAINT: self._generate_fixed_mapping_constraint,
+            FIXED_EDGES_CONSTRAINT: self._generate_fixed_edges_constraint,
         }
 
         # Constraint lower bounds registry
@@ -341,6 +437,7 @@ class MilpScipyRouter:
             LOGICAL_UNIQUENESS_CONSTRAINT: ONE_EQUALITY_CONSTRAINT_BOUND,
             PHYSICAL_UNIQUENESS_CONSTRAINT: ONE_EQUALITY_CONSTRAINT_BOUND,
             GATE_EXECUTION_CONSTRAINT: ONE_EQUALITY_CONSTRAINT_BOUND,
+            GATE_EXECUTION_LAYER_EDGE_UNIQUENESS_CONSTRAINT: ZERO_EQUALITY_CONSTRAINT_BOUND,
             GATE_MAPPING_CONSTRAINT: ZERO_EQUALITY_CONSTRAINT_BOUND,
             GATE_MAPPING_LEFT_QUBIT_CONSTRAINT: OPEN_LOWER_CONSTRAINT_BOUND,
             GATE_MAPPING_RIGHT_QUBIT_CONSTRAINT: OPEN_LOWER_CONSTRAINT_BOUND,
@@ -350,6 +447,7 @@ class MilpScipyRouter:
             GATE_EXECUTION_SWAP_CONSTRAINT: ZERO_EQUALITY_CONSTRAINT_BOUND,
             NON_GATE_SWAP_CONSTRAINT: ZERO_EQUALITY_CONSTRAINT_BOUND,
             FIXED_MAPPING_CONSTRAINT: ONE_EQUALITY_CONSTRAINT_BOUND,
+            FIXED_EDGES_CONSTRAINT: ONE_EQUALITY_CONSTRAINT_BOUND,
         }
 
         # Constraint upper bounds registry
@@ -357,6 +455,7 @@ class MilpScipyRouter:
             LOGICAL_UNIQUENESS_CONSTRAINT: ONE_EQUALITY_CONSTRAINT_BOUND,
             PHYSICAL_UNIQUENESS_CONSTRAINT: ONE_EQUALITY_CONSTRAINT_BOUND,
             GATE_EXECUTION_CONSTRAINT: ONE_EQUALITY_CONSTRAINT_BOUND,
+            GATE_EXECUTION_LAYER_EDGE_UNIQUENESS_CONSTRAINT: ONE_EQUALITY_CONSTRAINT_BOUND,
             GATE_MAPPING_CONSTRAINT: OPEN_UPPER_CONSTRAINT_BOUND,
             GATE_MAPPING_LEFT_QUBIT_CONSTRAINT: ZERO_EQUALITY_CONSTRAINT_BOUND,
             GATE_MAPPING_RIGHT_QUBIT_CONSTRAINT: ZERO_EQUALITY_CONSTRAINT_BOUND,
@@ -366,6 +465,7 @@ class MilpScipyRouter:
             GATE_EXECUTION_SWAP_CONSTRAINT: ZERO_EQUALITY_CONSTRAINT_BOUND,
             NON_GATE_SWAP_CONSTRAINT: ZERO_EQUALITY_CONSTRAINT_BOUND,
             FIXED_MAPPING_CONSTRAINT: ONE_EQUALITY_CONSTRAINT_BOUND,
+            FIXED_EDGES_CONSTRAINT: ONE_EQUALITY_CONSTRAINT_BOUND,
         }
 
     # TODO: CHECK THE UPDATES OF THE CSR
@@ -478,6 +578,7 @@ class MilpScipyRouter:
         """Generate gate execution uniqueness constraint coefficients.
 
         Ensures each gate executes on exactly one physical edge at its assigned timestep.
+        With gate layering, multiple gates in the same layer execute at the same timestep.
 
         Returns:
             Coefficient matrix for gate execution uniqueness constraints.
@@ -487,34 +588,35 @@ class MilpScipyRouter:
 
         constraint_index = 0
 
-        # For each operation, ensure it executes on exactly one physical edge
-        for operation_index in range(self.operation_count):
-            # Calculate the timestep when this operation is scheduled to execute
-            spaced_timestep = operation_index * self.worst_spacing
+        # For each layer, process all operations that execute in parallel
+        for layer_index in range(self.layer_count):
+            # For each operation in this layer
+            for operation in self.gate_layers[layer_index]:
+                # Get the operation index for variable indexing
+                operation_index = self.operations.index(operation)
 
-            # Consider all possible physical edges where the gate could execute
-            for physical_edge_index in range(self.coupling_map.number_of_edges()):
-                # Build multidimensional index for gate execution variable
-                gate_execution_multi_index = (
-                    spaced_timestep,
-                    operation_index,
-                    physical_edge_index,
-                )
-                # Convert to flat index within gate execution variable space
-                gate_execution_ravel_index = np.ravel_multi_index(
-                    gate_execution_multi_index, self.gate_execution_variables_shape
-                )
-                # Apply offset to position correctly in full decision variable vector
-                flattened_gate_execution_index = (
-                    self.flat_mapping_variables_shape + gate_execution_ravel_index
-                )
-                # Add coefficient of 1 for this gate execution variable
-                gate_execution_sparse_data.add_coefficient(
-                    1.0, constraint_index, flattened_gate_execution_index
-                )
+                # Consider all possible physical edges where the gate could execute
+                for physical_edge_index in range(self.coupling_map.number_of_edges()):
+                    # Build multidimensional index for gate execution variable (2D)
+                    gate_execution_multi_index = (
+                        operation_index,
+                        physical_edge_index,
+                    )
+                    # Convert to flat index within gate execution variable space
+                    gate_execution_ravel_index = np.ravel_multi_index(
+                        gate_execution_multi_index, self.gate_execution_variables_shape
+                    )
+                    # Apply offset to position correctly in full decision variable vector
+                    flattened_gate_execution_index = (
+                        self.flat_mapping_variables_shape + gate_execution_ravel_index
+                    )
+                    # Add coefficient of 1 for this gate execution variable
+                    gate_execution_sparse_data.add_coefficient(
+                        1.0, constraint_index, flattened_gate_execution_index
+                    )
 
-            # Move to next constraint row after processing all physical edges for this operation
-            constraint_index += 1
+                # Move to next constraint row after processing all physical edges for this operation
+                constraint_index += 1
 
         # Build sparse coefficient matrix
         # Total constraints = final constraint_index (number of constraints processed)
@@ -522,6 +624,58 @@ class MilpScipyRouter:
             gate_execution_sparse_data, constraint_index
         )
         return gate_execution_constraint
+
+    def _generate_gate_execution_layer_edge_uniqueness_constraint(self):
+        """Generate gate execution layer-edge uniqueness constraint coefficients.
+
+        Ensures at most one operation from each layer executes on any given physical edge.
+        This prevents multiple gates in the same layer from conflicting on the same edge,
+        which is essential for parallel gate execution.
+
+        Returns:
+            Coefficient matrix for gate execution layer-edge uniqueness constraints.
+        """
+        # Create sparse data container with default empty lists
+        layer_edge_uniqueness_sparse_data = ConstraintMatrixSparseData()
+
+        constraint_index = 0
+
+        # For each layer
+        for layer_index in range(self.layer_count):
+            # For each physical edge in the coupling map
+            for physical_edge_index in range(self.coupling_map.number_of_edges()):
+                # Sum over all operations in this layer for this edge
+                for operation in self.gate_layers[layer_index]:
+                    # Get the operation index for variable indexing
+                    operation_index = self.operations.index(operation)
+
+                    # Build multidimensional index for gate execution variable (2D)
+                    gate_execution_multi_index = (
+                        operation_index,
+                        physical_edge_index,
+                    )
+                    # Convert to flat index within gate execution variable space
+                    gate_execution_ravel_index = np.ravel_multi_index(
+                        gate_execution_multi_index, self.gate_execution_variables_shape
+                    )
+                    # Apply offset to position correctly in full decision variable vector
+                    flattened_gate_execution_index = (
+                        self.flat_mapping_variables_shape + gate_execution_ravel_index
+                    )
+                    # Add coefficient of 1 for this gate execution variable
+                    layer_edge_uniqueness_sparse_data.add_coefficient(
+                        1.0, constraint_index, flattened_gate_execution_index
+                    )
+
+                # Move to next constraint row after processing all operations for this layer-edge combination
+                constraint_index += 1
+
+        # Build sparse coefficient matrix
+        # Total constraints = layer_count × edge_count
+        layer_edge_uniqueness_constraint = self._build_sparse_coefficient_matrix(
+            layer_edge_uniqueness_sparse_data, constraint_index
+        )
+        return layer_edge_uniqueness_constraint
 
     def _generate_gate_mapping_constraint(self):
         """Generate gate mapping constraint coefficients using McCormick relaxation.
@@ -537,33 +691,34 @@ class MilpScipyRouter:
 
         constraint_index = 0
 
-        # For each operation and each possible physical edge
-        for operation_index in range(self.operation_count):
-            # Calculate the timestep when this operation is scheduled to execute
-            spaced_timestep = operation_index * self.worst_spacing
+        # For each layer, process all operations that execute in parallel
+        for layer_index in range(self.layer_count):
+            # For each operation in this layer
+            for operation in self.gate_layers[layer_index]:
+                # Get the operation index for variable indexing
+                operation_index = self.operations.index(operation)
 
-            for physical_edge_index in range(self.coupling_map.number_of_edges()):
-                # Build multidimensional index for gate execution variable
-                gate_execution_multi_index = (
-                    spaced_timestep,
-                    operation_index,
-                    physical_edge_index,
-                )
-                # Convert to flat index within gate execution variable space
-                gate_execution_ravel_index = np.ravel_multi_index(
-                    gate_execution_multi_index, self.gate_execution_variables_shape
-                )
-                # Apply offset to position correctly in full decision variable vector
-                flattened_gate_execution_index = (
-                    self.flat_mapping_variables_shape + gate_execution_ravel_index
-                )
-                # Add coefficient of 1 for gate execution variable
-                gate_mapping_sparse_data.add_coefficient(
-                    1.0, constraint_index, flattened_gate_execution_index
-                )
+                for physical_edge_index in range(self.coupling_map.number_of_edges()):
+                    # Build multidimensional index for gate execution variable (2D)
+                    gate_execution_multi_index = (
+                        operation_index,
+                        physical_edge_index,
+                    )
+                    # Convert to flat index within gate execution variable space
+                    gate_execution_ravel_index = np.ravel_multi_index(
+                        gate_execution_multi_index, self.gate_execution_variables_shape
+                    )
+                    # Apply offset to position correctly in full decision variable vector
+                    flattened_gate_execution_index = (
+                        self.flat_mapping_variables_shape + gate_execution_ravel_index
+                    )
+                    # Add coefficient of 1 for gate execution variable
+                    gate_mapping_sparse_data.add_coefficient(
+                        1.0, constraint_index, flattened_gate_execution_index
+                    )
 
-                # Move to next constraint row after processing this operation-edge combination
-                constraint_index += 1
+                    # Move to next constraint row after processing this operation-edge combination
+                    constraint_index += 1
 
         # Build sparse coefficient matrix
         # Total constraints = final constraint_index (number of constraints processed)
@@ -586,56 +741,59 @@ class MilpScipyRouter:
 
         constraint_index = 0
 
-        # For each operation and each possible physical edge
-        for operation_index in range(self.operation_count):
-            # Calculate the timestep when this operation is scheduled to execute
-            spaced_timestep = operation_index * self.worst_spacing
+        # For each layer, process all operations that execute in parallel
+        for layer_index in range(self.layer_count):
+            # Calculate the timestep when operations in this layer execute
+            spaced_timestep = layer_index * self.worst_spacing
 
-            for physical_edge_index in range(self.coupling_map.number_of_edges()):
-                # Build multidimensional index for gate execution variable
-                gate_execution_multi_index = (
-                    spaced_timestep,
-                    operation_index,
-                    physical_edge_index,
-                )
-                # Convert to flat index within gate execution variable space
-                gate_execution_ravel_index = np.ravel_multi_index(
-                    gate_execution_multi_index, self.gate_execution_variables_shape
-                )
-                # Apply offset to position correctly in full decision variable vector
-                flattened_gate_execution_index = (
-                    self.flat_mapping_variables_shape + gate_execution_ravel_index
-                )
-                # Add coefficient of 1 for gate execution variable
-                gate_mapping_left_sparse_data.add_coefficient(
-                    1.0, constraint_index, flattened_gate_execution_index
-                )
+            # For each operation in this layer
+            for operation in self.gate_layers[layer_index]:
+                # Get the operation index for variable indexing
+                operation_index = self.operations.index(operation)
 
                 # Get the logical qubits participating in this operation
-                left_logical_qubit, right_logical_qubit = self.operations[
-                    operation_index
-                ].qubits_participating
-                # Get the physical edge (left and right physical qubits)
-                physical_edge = self.coupling_map_edges[physical_edge_index]
-                left_physical_qubit, right_physical_qubit = physical_edge
+                left_logical_qubit, right_logical_qubit = operation.qubits_participating
 
-                # Build multidimensional index for left qubit mapping variable
-                left_qubit_mapping_multi_index = (
-                    spaced_timestep,
-                    left_physical_qubit.index,
-                    left_logical_qubit.index,
-                )
-                # Convert to flat index for left qubit mapping variable
-                left_qubit_mapping_ravel_index = np.ravel_multi_index(
-                    left_qubit_mapping_multi_index, self.mapping_variables_shape
-                )
-                # Add coefficient of -1 for left qubit mapping variable
-                gate_mapping_left_sparse_data.add_coefficient(
-                    -1.0, constraint_index, left_qubit_mapping_ravel_index
-                )
+                for physical_edge_index in range(self.coupling_map.number_of_edges()):
+                    # Build multidimensional index for gate execution variable (2D)
+                    gate_execution_multi_index = (
+                        operation_index,
+                        physical_edge_index,
+                    )
+                    # Convert to flat index within gate execution variable space
+                    gate_execution_ravel_index = np.ravel_multi_index(
+                        gate_execution_multi_index, self.gate_execution_variables_shape
+                    )
+                    # Apply offset to position correctly in full decision variable vector
+                    flattened_gate_execution_index = (
+                        self.flat_mapping_variables_shape + gate_execution_ravel_index
+                    )
+                    # Add coefficient of 1 for gate execution variable
+                    gate_mapping_left_sparse_data.add_coefficient(
+                        1.0, constraint_index, flattened_gate_execution_index
+                    )
 
-                # Move to next constraint row after processing this operation-edge combination
-                constraint_index += 1
+                    # Get the physical edge (left and right physical qubits)
+                    physical_edge = self.coupling_map_edges[physical_edge_index]
+                    left_physical_qubit, right_physical_qubit = physical_edge
+
+                    # Build multidimensional index for left qubit mapping variable
+                    left_qubit_mapping_multi_index = (
+                        spaced_timestep,
+                        left_physical_qubit.index,
+                        left_logical_qubit.index,
+                    )
+                    # Convert to flat index for left qubit mapping variable
+                    left_qubit_mapping_ravel_index = np.ravel_multi_index(
+                        left_qubit_mapping_multi_index, self.mapping_variables_shape
+                    )
+                    # Add coefficient of -1 for left qubit mapping variable
+                    gate_mapping_left_sparse_data.add_coefficient(
+                        -1.0, constraint_index, left_qubit_mapping_ravel_index
+                    )
+
+                    # Move to next constraint row after processing this operation-edge combination
+                    constraint_index += 1
 
         # Build sparse coefficient matrix
         # Total constraints = final constraint_index (number of constraints processed)
@@ -658,57 +816,59 @@ class MilpScipyRouter:
 
         constraint_index = 0
 
-        # For each operation and each possible physical edge
-        for operation_index in range(self.operation_count):
-            # Calculate the timestep when this operation is scheduled to execute
-            spaced_timestep = operation_index * self.worst_spacing
+        # For each layer, process all operations that execute in parallel
+        for layer_index in range(self.layer_count):
+            # Calculate the timestep when operations in this layer execute
+            spaced_timestep = layer_index * self.worst_spacing
 
-            for physical_edge_index in range(self.coupling_map.number_of_edges()):
-                # Build multidimensional index for gate execution variable
-                gate_execution_multi_index = (
-                    spaced_timestep,
-                    operation_index,
-                    physical_edge_index,
-                )
-                # Convert to flat index within gate execution variable space
-                gate_execution_ravel_index = np.ravel_multi_index(
-                    gate_execution_multi_index, self.gate_execution_variables_shape
-                )
-                # Apply offset to position correctly in full decision variable vector
-                flattened_gate_execution_index = (
-                    self.flat_mapping_variables_shape + gate_execution_ravel_index
-                )
-                # Add coefficient of 1 for gate execution variable
-                gate_mapping_right_sparse_data.add_coefficient(
-                    1.0, constraint_index, flattened_gate_execution_index
-                )
+            # For each operation in this layer
+            for operation in self.gate_layers[layer_index]:
+                # Get the operation index for variable indexing
+                operation_index = self.operations.index(operation)
 
                 # Get the logical qubits participating in this operation
-                left_logical_qubit, right_logical_qubit = self.operations[
-                    operation_index
-                ].qubits_participating
+                left_logical_qubit, right_logical_qubit = operation.qubits_participating
 
-                # Get the physical edge (left and right physical qubits)
-                physical_edge = self.coupling_map_edges[physical_edge_index]
-                left_physical_qubit, right_physical_qubit = physical_edge
+                for physical_edge_index in range(self.coupling_map.number_of_edges()):
+                    # Build multidimensional index for gate execution variable (2D)
+                    gate_execution_multi_index = (
+                        operation_index,
+                        physical_edge_index,
+                    )
+                    # Convert to flat index within gate execution variable space
+                    gate_execution_ravel_index = np.ravel_multi_index(
+                        gate_execution_multi_index, self.gate_execution_variables_shape
+                    )
+                    # Apply offset to position correctly in full decision variable vector
+                    flattened_gate_execution_index = (
+                        self.flat_mapping_variables_shape + gate_execution_ravel_index
+                    )
+                    # Add coefficient of 1 for gate execution variable
+                    gate_mapping_right_sparse_data.add_coefficient(
+                        1.0, constraint_index, flattened_gate_execution_index
+                    )
 
-                # Build multidimensional index for right qubit mapping variable
-                right_qubit_mapping_multi_index = (
-                    spaced_timestep,
-                    right_physical_qubit.index,
-                    right_logical_qubit.index,
-                )
-                # Convert to flat index for right qubit mapping variable
-                right_qubit_mapping_ravel_index = np.ravel_multi_index(
-                    right_qubit_mapping_multi_index, self.mapping_variables_shape
-                )
-                # Add coefficient of -1 for right qubit mapping variable
-                gate_mapping_right_sparse_data.add_coefficient(
-                    -1.0, constraint_index, right_qubit_mapping_ravel_index
-                )
+                    # Get the physical edge (left and right physical qubits)
+                    physical_edge = self.coupling_map_edges[physical_edge_index]
+                    left_physical_qubit, right_physical_qubit = physical_edge
 
-                # Move to next constraint row after processing this operation-edge combination
-                constraint_index += 1
+                    # Build multidimensional index for right qubit mapping variable
+                    right_qubit_mapping_multi_index = (
+                        spaced_timestep,
+                        right_physical_qubit.index,
+                        right_logical_qubit.index,
+                    )
+                    # Convert to flat index for right qubit mapping variable
+                    right_qubit_mapping_ravel_index = np.ravel_multi_index(
+                        right_qubit_mapping_multi_index, self.mapping_variables_shape
+                    )
+                    # Add coefficient of -1 for right qubit mapping variable
+                    gate_mapping_right_sparse_data.add_coefficient(
+                        -1.0, constraint_index, right_qubit_mapping_ravel_index
+                    )
+
+                    # Move to next constraint row after processing this operation-edge combination
+                    constraint_index += 1
 
         # Build sparse coefficient matrix
         # Total constraints = final constraint_index (number of constraints processed)
@@ -730,72 +890,74 @@ class MilpScipyRouter:
 
         constraint_index = 0
 
-        # For each operation and each possible physical edge
-        for operation_index in range(self.operation_count):
-            # Calculate the timestep when this operation is scheduled to execute
-            spaced_timestep = operation_index * self.worst_spacing
+        # For each layer, process all operations that execute in parallel
+        for layer_index in range(self.layer_count):
+            # Calculate the timestep when operations in this layer execute
+            spaced_timestep = layer_index * self.worst_spacing
 
-            for physical_edge_index in range(self.coupling_map.number_of_edges()):
-                # Build multidimensional index for gate execution variable
-                gate_execution_multi_index = (
-                    spaced_timestep,
-                    operation_index,
-                    physical_edge_index,
-                )
-                # Convert to flat index within gate execution variable space
-                gate_execution_ravel_index = np.ravel_multi_index(
-                    gate_execution_multi_index, self.gate_execution_variables_shape
-                )
-                # Apply offset to position correctly in full decision variable vector
-                flattened_gate_execution_index = (
-                    self.flat_mapping_variables_shape + gate_execution_ravel_index
-                )
-                # Add coefficient of 1 for gate execution variable
-                gate_mapping_full_sparse_data.add_coefficient(
-                    1.0, constraint_index, flattened_gate_execution_index
-                )
+            # For each operation in this layer
+            for operation in self.gate_layers[layer_index]:
+                # Get the operation index for variable indexing
+                operation_index = self.operations.index(operation)
 
                 # Get the logical qubits participating in this operation
-                left_logical_qubit, right_logical_qubit = self.operations[
-                    operation_index
-                ].qubits_participating
+                left_logical_qubit, right_logical_qubit = operation.qubits_participating
 
-                # Get the physical edge (left and right physical qubits)
-                physical_edge = self.coupling_map_edges[physical_edge_index]
-                left_physical_qubit, right_physical_qubit = physical_edge
+                for physical_edge_index in range(self.coupling_map.number_of_edges()):
+                    # Build multidimensional index for gate execution variable (2D)
+                    gate_execution_multi_index = (
+                        operation_index,
+                        physical_edge_index,
+                    )
+                    # Convert to flat index within gate execution variable space
+                    gate_execution_ravel_index = np.ravel_multi_index(
+                        gate_execution_multi_index, self.gate_execution_variables_shape
+                    )
+                    # Apply offset to position correctly in full decision variable vector
+                    flattened_gate_execution_index = (
+                        self.flat_mapping_variables_shape + gate_execution_ravel_index
+                    )
+                    # Add coefficient of 1 for gate execution variable
+                    gate_mapping_full_sparse_data.add_coefficient(
+                        1.0, constraint_index, flattened_gate_execution_index
+                    )
 
-                # Build multidimensional index for left qubit mapping variable
-                left_qubit_mapping_multi_index = (
-                    spaced_timestep,
-                    left_physical_qubit.index,
-                    left_logical_qubit.index,
-                )
-                # Convert to flat index for left qubit mapping variable
-                left_qubit_mapping_ravel_index = np.ravel_multi_index(
-                    left_qubit_mapping_multi_index, self.mapping_variables_shape
-                )
-                # Add coefficient of -1 for left qubit mapping variable
-                gate_mapping_full_sparse_data.add_coefficient(
-                    -1.0, constraint_index, left_qubit_mapping_ravel_index
-                )
+                    # Get the physical edge (left and right physical qubits)
+                    physical_edge = self.coupling_map_edges[physical_edge_index]
+                    left_physical_qubit, right_physical_qubit = physical_edge
 
-                # Build multidimensional index for right qubit mapping variable
-                right_qubit_mapping_multi_index = (
-                    spaced_timestep,
-                    right_physical_qubit.index,
-                    right_logical_qubit.index,
-                )
-                # Convert to flat index for right qubit mapping variable
-                right_qubit_mapping_ravel_index = np.ravel_multi_index(
-                    right_qubit_mapping_multi_index, self.mapping_variables_shape
-                )
-                # Add coefficient of -1 for right qubit mapping variable
-                gate_mapping_full_sparse_data.add_coefficient(
-                    -1.0, constraint_index, right_qubit_mapping_ravel_index
-                )
+                    # Build multidimensional index for left qubit mapping variable
+                    left_qubit_mapping_multi_index = (
+                        spaced_timestep,
+                        left_physical_qubit.index,
+                        left_logical_qubit.index,
+                    )
+                    # Convert to flat index for left qubit mapping variable
+                    left_qubit_mapping_ravel_index = np.ravel_multi_index(
+                        left_qubit_mapping_multi_index, self.mapping_variables_shape
+                    )
+                    # Add coefficient of -1 for left qubit mapping variable
+                    gate_mapping_full_sparse_data.add_coefficient(
+                        -1.0, constraint_index, left_qubit_mapping_ravel_index
+                    )
 
-                # Move to next constraint row after processing this operation-edge combination
-                constraint_index += 1
+                    # Build multidimensional index for right qubit mapping variable
+                    right_qubit_mapping_multi_index = (
+                        spaced_timestep,
+                        right_physical_qubit.index,
+                        right_logical_qubit.index,
+                    )
+                    # Convert to flat index for right qubit mapping variable
+                    right_qubit_mapping_ravel_index = np.ravel_multi_index(
+                        right_qubit_mapping_multi_index, self.mapping_variables_shape
+                    )
+                    # Add coefficient of -1 for right qubit mapping variable
+                    gate_mapping_full_sparse_data.add_coefficient(
+                        -1.0, constraint_index, right_qubit_mapping_ravel_index
+                    )
+
+                    # Move to next constraint row after processing this operation-edge combination
+                    constraint_index += 1
 
         # Build sparse coefficient matrix
         # Total constraints = final constraint_index (number of constraints processed)
@@ -998,63 +1160,63 @@ class MilpScipyRouter:
             self.flat_mapping_variables_shape + self.flat_gate_execution_variables_shape
         )
 
-        # For each operation timestep where gate execution occurs
-        for operation_index in range(self.operation_count):
-            # Calculate the timestep when this operation is scheduled to execute
-            spaced_timestep = operation_index * self.worst_spacing
+        # For each layer, process all operations that execute in parallel
+        for layer_index in range(self.layer_count):
+            # Calculate the timestep when operations in this layer execute
+            spaced_timestep = layer_index * self.worst_spacing
 
-            # Get the logical qubits participating in this operation
-            left_logical_qubit, right_logical_qubit = self.operations[
-                operation_index
-            ].qubits_participating
+            # For each operation in this layer
+            for operation in self.gate_layers[layer_index]:
+                # Get the logical qubits participating in this operation
+                left_logical_qubit, right_logical_qubit = operation.qubits_participating
 
-            # For each physical edge in the coupling map
-            for physical_edge_index in range(self.coupling_map.number_of_edges()):
-                physical_edge = self.coupling_map_edges[physical_edge_index]
-                left_physical_qubit, right_physical_qubit = physical_edge
+                # For each physical edge in the coupling map
+                for physical_edge_index in range(self.coupling_map.number_of_edges()):
+                    physical_edge = self.coupling_map_edges[physical_edge_index]
+                    left_physical_qubit, right_physical_qubit = physical_edge
 
-                # Build constraint: x^t_{p,i,j} - x^t_{q,j,i} = 0
-                # where p = left_physical_qubit, q = right_physical_qubit
-                # i = left_logical_qubit, j = right_logical_qubit
+                    # Build constraint: x^t_{p,i,j} - x^t_{q,j,i} = 0
+                    # where p = left_physical_qubit, q = right_physical_qubit
+                    # i = left_logical_qubit, j = right_logical_qubit
 
-                # Add coefficient +1 for movement from left physical to right physical
-                # for left logical qubit
-                forward_movement_multi_index = (
-                    spaced_timestep,
-                    left_logical_qubit.index,
-                    left_physical_qubit.index,
-                    right_physical_qubit.index,
-                )
-                forward_movement_ravel_index = np.ravel_multi_index(
-                    forward_movement_multi_index, self.qubit_movement_shape
-                )
-                forward_movement_flat_index = (
-                    movement_variables_offset + forward_movement_ravel_index
-                )
-                gate_execution_swap_sparse_data.add_coefficient(
-                    1.0, constraint_index, forward_movement_flat_index
-                )
+                    # Add coefficient +1 for movement from left physical to right physical
+                    # for left logical qubit
+                    forward_movement_multi_index = (
+                        spaced_timestep,
+                        left_logical_qubit.index,
+                        left_physical_qubit.index,
+                        right_physical_qubit.index,
+                    )
+                    forward_movement_ravel_index = np.ravel_multi_index(
+                        forward_movement_multi_index, self.qubit_movement_shape
+                    )
+                    forward_movement_flat_index = (
+                        movement_variables_offset + forward_movement_ravel_index
+                    )
+                    gate_execution_swap_sparse_data.add_coefficient(
+                        1.0, constraint_index, forward_movement_flat_index
+                    )
 
-                # Add coefficient -1 for movement from right physical to left physical
-                # for right logical qubit
-                backward_movement_multi_index = (
-                    spaced_timestep,
-                    right_logical_qubit.index,
-                    right_physical_qubit.index,
-                    left_physical_qubit.index,
-                )
-                backward_movement_ravel_index = np.ravel_multi_index(
-                    backward_movement_multi_index, self.qubit_movement_shape
-                )
-                backward_movement_flat_index = (
-                    movement_variables_offset + backward_movement_ravel_index
-                )
-                gate_execution_swap_sparse_data.add_coefficient(
-                    -1.0, constraint_index, backward_movement_flat_index
-                )
+                    # Add coefficient -1 for movement from right physical to left physical
+                    # for right logical qubit
+                    backward_movement_multi_index = (
+                        spaced_timestep,
+                        right_logical_qubit.index,
+                        right_physical_qubit.index,
+                        left_physical_qubit.index,
+                    )
+                    backward_movement_ravel_index = np.ravel_multi_index(
+                        backward_movement_multi_index, self.qubit_movement_shape
+                    )
+                    backward_movement_flat_index = (
+                        movement_variables_offset + backward_movement_ravel_index
+                    )
+                    gate_execution_swap_sparse_data.add_coefficient(
+                        -1.0, constraint_index, backward_movement_flat_index
+                    )
 
-                # Move to next constraint row
-                constraint_index += 1
+                    # Move to next constraint row
+                    constraint_index += 1
 
         # Build sparse coefficient matrix
         # Total constraints = final constraint_index (number of constraints processed)
@@ -1083,17 +1245,17 @@ class MilpScipyRouter:
             self.flat_mapping_variables_shape + self.flat_gate_execution_variables_shape
         )
 
-        # For each operation timestep where gate execution occurs
-        for operation_index in range(self.operation_count):
-            # Calculate the timestep when this operation is scheduled to execute
-            spaced_timestep = operation_index * self.worst_spacing
+        # For each layer, process all operations that execute in parallel
+        for layer_index in range(self.layer_count):
+            # Calculate the timestep when operations in this layer execute
+            spaced_timestep = layer_index * self.worst_spacing
 
-            # Get the logical qubits participating in this operation
-            participating_qubits = set(
-                self.operations[operation_index].qubits_participating
-            )
+            # Collect all logical qubits participating in ANY operation in this layer
+            participating_qubits: set[quariadne.circuit.LogicalQubit] = set()
+            for operation in self.gate_layers[layer_index]:
+                participating_qubits.update(operation.qubits_participating)
 
-            # Get all logical qubits that are NOT participating in this operation
+            # Get all logical qubits that are NOT participating in any operation in this layer
             all_logical_qubits = set(self.qubits)
             non_participating_qubits = all_logical_qubits - participating_qubits
 
@@ -1176,13 +1338,13 @@ class MilpScipyRouter:
 
         fixed_steps_count = self.fixed_mapping.shape[0]
 
-        # Iterate through operation timesteps (not all spaced timesteps)
-        for operation_index in range(fixed_steps_count):
-            # Calculate the timestep when this operation is scheduled to execute
-            spaced_timestep = operation_index * self.worst_spacing
+        # Iterate through fixed timesteps (indexed by fixed_mapping rows)
+        for fixed_timestep_index in range(fixed_steps_count):
+            # Calculate the spaced timestep for this fixed mapping
+            spaced_timestep = fixed_timestep_index * self.worst_spacing
 
             # Get the fixed mapping for this timestep
-            timestep_fixed_mapping = self.fixed_mapping[operation_index]
+            timestep_fixed_mapping = self.fixed_mapping[fixed_timestep_index]
             # Find all non-zero positions in the fixed mapping for this timestep
             fixed_mapping_indices = np.argwhere(timestep_fixed_mapping)
             for physical_idx, logical_idx in fixed_mapping_indices:
@@ -1212,6 +1374,64 @@ class MilpScipyRouter:
         )
 
         return fixed_mapping_constraint
+
+    def _generate_fixed_edges_constraint(self):
+        """Generate fixed edges constraint coefficients.
+
+        Constrains gate_execution variables to match the provided fixed edges.
+        This constraint ensures that specific operation-to-edge assignments are enforced
+        when a fixed_edges list is provided during router initialisation.
+
+        Returns:
+            Coefficient matrix for fixed edges constraints.
+        """
+        # Only generate constraints if fixed_edges is provided
+        if self.fixed_edges is None:
+            # Return empty constraint matrix if no fixed edges
+            empty_sparse_data = ConstraintMatrixSparseData()
+            return self._build_sparse_coefficient_matrix(empty_sparse_data, 0)
+
+        # Create sparse data container with default empty lists
+        fixed_edges_sparse_data = ConstraintMatrixSparseData()
+
+        constraint_index = 0
+
+        layer_offset = 0
+        # Iterate through each layer's edge assignments
+        for layer_idx, layer_edge_assignments in enumerate(self.fixed_edges):
+            # For each (operation_idx, edge_idx) assignment in this layer
+            for operation_idx, edge_idx in layer_edge_assignments:
+                offseted_operation_index = layer_offset + operation_idx
+                # Build multidimensional index for gate execution variable (2D)
+                gate_execution_multi_index = (
+                    offseted_operation_index,
+                    edge_idx,
+                )
+
+                # Convert to flat index within gate execution variable space
+                gate_execution_ravel_index = np.ravel_multi_index(
+                    gate_execution_multi_index, self.gate_execution_variables_shape
+                )
+                # Apply offset to position correctly in full decision variable vector
+                flattened_gate_execution_index = (
+                    self.flat_mapping_variables_shape + gate_execution_ravel_index
+                )
+                # Add coefficient of 1 for this gate execution variable
+                fixed_edges_sparse_data.add_coefficient(
+                    1.0, constraint_index, flattened_gate_execution_index
+                )
+
+                # Move to next constraint row for each fixed edge position
+                constraint_index += 1
+            layer_offset += len(self.gate_layers[layer_idx])
+
+        # Build sparse coefficient matrix
+        # Total constraints = final constraint_index (number of constraints processed)
+        fixed_edges_constraint = self._build_sparse_coefficient_matrix(
+            fixed_edges_sparse_data, constraint_index
+        )
+
+        return fixed_edges_constraint
 
     def _generate_all_constraints(self):
         """Generate all MILP constraints as scipy LinearConstraint objects.
@@ -1324,14 +1544,27 @@ class MilpScipyRouter:
             self.full_decision_variables_shape, self.integrality
         )
 
+        # Configure solver options
+        solver_options = HiGHSSolverOptions(
+            time_limit=MILP_SOLVER_TIMEOUT_SECONDS, write_model_to_file=True
+        )
+        solver_options_dict = asdict(solver_options)
+
         # Solve the MILP problem
         milp_result = scipy.optimize.milp(
             c=optimisation_coefficients,
             integrality=integrality_constraints,
             bounds=variables_bounds,
             constraints=constraints,
+            options=solver_options_dict,
         )
 
+        # Check for timeout (status == 1 indicates iteration or time limit reached)
+        if milp_result.status == 1:
+            raise TimeoutError(
+                f"HiGHS solver exceeded time limit of {MILP_SOLVER_TIMEOUT_SECONDS} seconds. "
+                f"Solver message: {milp_result.message}"
+            )
         # TODO: Round solution to handle numerical precision issues
         # This may be removed when transitioning to scipy.optimize.linprog
         # TODO: fix typing issue
@@ -1405,526 +1638,3 @@ class MilpScipyRouter:
             qubit_movement_variables=qubit_movement_variables,
             worst_spacing=self.worst_spacing,
         )
-
-
-class IlpRouter:
-    """Integer Linear Programming router for quantum circuit qubit routing.
-
-    High-level router that handles the complete routing process including running
-    the optimisation, processing results, and extracting initial mappings and swap operations.
-    Uses MilpScipyRouter internally for the mathematical optimisation.
-
-    This class provides the main interface for quantum circuit routing and automatically
-    processes the results into usable routing information.
-
-    Attributes:
-        result: The routing result containing all variable matrices
-    """
-
-    def __init__(
-        self,
-        coupling_map: nx.DiGraph,
-        quantum_circuit: quariadne.circuit.AbstractQuantumCircuit,
-    ):
-        """Initialize the ILP router and automatically run the routing.
-
-        Args:
-            coupling_map: NetworkX DiGraph representing the physical qubit connectivity
-            quantum_circuit: Abstract quantum circuit representation to be routed
-        """
-        two_qubit_operations = quantum_circuit.get_two_qubit_operations()
-        qubits = quantum_circuit.qubits
-
-        milp_router = MilpScipyRouter(
-            coupling_map=coupling_map,
-            two_qubit_operations=two_qubit_operations,
-            qubits=qubits,
-            integrality=INTEGER_VARIABLE_INTEGRALITY,
-            fixed_mapping=None,
-        )
-        self.result = milp_router.run()
-
-    def get_initial_mapping(
-        self,
-    ) -> dict[quariadne.circuit.LogicalQubit, quariadne.circuit.PhysicalQubit]:
-        """Calculate initial mapping from mapping variables at timestep 0.
-
-        Extracts the mapping at the first timestep (t=0) and returns a dictionary
-        mapping logical qubits to physical qubits for the initial state.
-
-        Returns:
-            Dictionary mapping LogicalQubit objects to PhysicalQubit objects
-            representing the initial qubit mapping.
-        """
-        # Extract the mapping matrix at timestep 0
-        initial_timestep_mapping = self.result.mapping_variables[0]
-
-        # Find all non-zero positions (physical_idx, logical_idx) where mapping exists
-        initial_mapping_indices = np.argwhere(initial_timestep_mapping)
-
-        # Convert numpy array to Python list for iteration
-        # tolist() ensures we get Python integers rather than numpy.int64 objects
-        # which are required for the PhysicalQubit and LogicalQubit constructors
-        initial_mapping_indices_list = initial_mapping_indices.tolist()
-
-        # Build the mapping dictionary (logical → physical, matching notebook implementation)
-        mapping_dict = {}
-        for physical_idx, logical_idx in initial_mapping_indices_list:
-            physical_qubit = quariadne.circuit.PhysicalQubit(physical_idx)
-            logical_qubit = quariadne.circuit.LogicalQubit(logical_idx)
-            mapping_dict[logical_qubit] = physical_qubit
-
-        return mapping_dict
-
-    def get_inserted_swaps(self) -> dict[int, list[quariadne.circuit.PhysicalSwap]]:
-        """Extract swap operations from qubit movement variables.
-
-        TODO: Implement this operation e2e, now this is too raw.
-        Analyses the qubit movement variables to identify SWAP operations that occur
-        after each operation timestep. SWAP operations are detected by finding pairs of
-        qubits that exchange positions between physical locations.
-
-        Returns:
-            Dictionary mapping operation indices (0-based) to lists of PhysicalSwap objects.
-            Each swap pair is represented as a PhysicalSwap containing two PhysicalQubit objects.
-
-        Example:
-            {
-                0: [],  # No swaps after operation 0
-                1: [PhysicalSwap(PhysicalQubit(0), PhysicalQubit(1))],  # SWAP between physical qubits 0 and 1 after operation 1
-                2: [PhysicalSwap(PhysicalQubit(2), PhysicalQubit(3)), PhysicalSwap(PhysicalQubit(0), PhysicalQubit(4))]  # Two SWAPs after operation 2
-            }
-        """
-        swap_pairs_by_operation: defaultdict = defaultdict(list)
-
-        # Find all non-zero movement variables where actual movement occurs
-        defined_movements = np.argwhere(self.result.qubit_movement_variables)
-
-        for movement in defined_movements:
-            timestep, logical_qubit, from_qubit, to_qubit = movement.tolist()
-
-            # Only consider actual movements (not self-assignments)
-            if from_qubit != to_qubit:
-                # Convert timestep to operation index using worst_spacing division
-                # The +1 is an offset accounting for the fact that swaps happen AFTER respective operations
-                operation_index = timestep // self.result.worst_spacing + 1
-
-                # Create PhysicalSwap with proper qubit objects
-                physical_qubit_from = quariadne.circuit.PhysicalQubit(from_qubit)
-                physical_qubit_to = quariadne.circuit.PhysicalQubit(to_qubit)
-                swap_pair = quariadne.circuit.PhysicalSwap(
-                    physical_qubit_from, physical_qubit_to
-                )
-
-                # Get current operation's swap list
-                current_operation_swaps = swap_pairs_by_operation[operation_index]
-
-                # Add swap pair if not already present (avoids duplicates through PhysicalSwap equality)
-                if swap_pair not in current_operation_swaps:
-                    current_operation_swaps.append(swap_pair)
-
-        return swap_pairs_by_operation
-
-
-class LpRouter:
-    """Linear Programming router for quantum circuit qubit routing using iterative mapping recovery.
-
-    This router uses continuous variables (integrality=0) instead of integer variables and employs
-    an iterative approach with Birkhoff-von Neumann decomposition to extract permutation mappings
-    from doubly stochastic matrices. The process follows a bootstrap phase followed by iterative
-    mapping recovery to generate a full scheme of mappings and sequence of swaps.
-
-    Attributes:
-        coupling_map: NetworkX DiGraph representing physical qubit connectivity
-        qubits: Tuple of logical qubits to be routed
-        two_qubit_operations: List of two-qubit operations to be routed
-        mappings: List of extracted mappings from iterative process
-        permutations: List of permutation matrices corresponding to mappings
-        swaps_by_operation: Dictionary mapping operation indices to swap lists
-    """
-
-    def __init__(
-        self,
-        coupling_map: nx.DiGraph,
-        quantum_circuit: quariadne.circuit.AbstractQuantumCircuit,
-    ):
-        """Initialize the LP router and automatically run the routing.
-
-        Args:
-            coupling_map: NetworkX DiGraph representing the physical qubit connectivity
-            quantum_circuit: Abstract quantum circuit representation to be routed
-        """
-        self.coupling_map = coupling_map
-        self.qubits = quantum_circuit.qubits
-        self.two_qubit_operations = quantum_circuit.get_two_qubit_operations()
-        self.mappings: list[
-            dict[quariadne.circuit.LogicalQubit, quariadne.circuit.PhysicalQubit]
-        ] = []
-        self.permutations: list[np.ndarray] = []
-        self.swaps_by_operation: dict[int, list[quariadne.circuit.PhysicalSwap]] = {}
-
-        # Run routing automatically
-        self._run()
-
-    def _get_initial_permutation(self) -> np.ndarray:
-        """Get initial permutation using LP bootstrap phase.
-
-        Uses Linear Programming (integrality=0) without constraints to get the initial
-        mapping through optimisation. Extracts a compatible permutation using Birkhoff decomposition.
-
-        Returns:
-            Initial permutation matrix
-        """
-        # Get first two-qubit operation
-        first_two_qubit_operation = self.two_qubit_operations[0]
-
-        # Run LP optimisation with continuous variables and no fixed mapping
-        lp_router = MilpScipyRouter(
-            coupling_map=self.coupling_map,
-            two_qubit_operations=self.two_qubit_operations,
-            qubits=self.qubits,
-            integrality=CONTINUOUS_VARIABLE_INTEGRALITY,
-            fixed_mapping=None,
-        )
-        lp_result = lp_router.run()
-
-        # Extract compatible permutation for first two-qubit operation
-        bootstrap_mapping_variables = lp_result.mapping_variables[0]
-        initial_permutation = self._extract_permutation_for_operation(
-            bootstrap_mapping_variables, first_two_qubit_operation
-        )
-
-        return initial_permutation
-
-    def _get_next_permutation(
-        self,
-        current_permutation: np.ndarray,
-        current_operation: quariadne.circuit.QuantumOperation,
-        remaining_operations: list[quariadne.circuit.QuantumOperation],
-    ) -> np.ndarray:
-        """Get next permutation by running LP on remaining operations with fixed current permutation.
-
-        Args:
-            current_permutation: Current permutation matrix to fix as constraint
-            current_operation: Operation that needs to be made executable
-            remaining_operations: List of remaining two-qubit operations to route
-
-        Returns:
-            Next permutation matrix compatible with the current operation
-        """
-        # Run LP on remaining operations with current permutation fixed
-        fixed_permutation_array = current_permutation[np.newaxis, ...]
-
-        lp_router = MilpScipyRouter(
-            coupling_map=self.coupling_map,
-            two_qubit_operations=remaining_operations,
-            qubits=self.qubits,
-            integrality=CONTINUOUS_VARIABLE_INTEGRALITY,
-            fixed_mapping=fixed_permutation_array,
-        )
-        lp_result = lp_router.run()
-
-        # Extract next permutation at first operation timestep
-        next_mapping_timestep = lp_result.worst_spacing
-        next_mapping_variables = lp_result.mapping_variables[next_mapping_timestep]
-
-        next_permutation = self._extract_permutation_for_operation(
-            next_mapping_variables, current_operation
-        )
-        return next_permutation
-
-    def _create_physical_to_logical_mapping(
-        self, permutation_matrix: np.ndarray
-    ) -> dict[quariadne.circuit.PhysicalQubit, quariadne.circuit.LogicalQubit]:
-        """Create a mapping from physical to logical qubits from a permutation matrix.
-
-        Args:
-            permutation_matrix: 2D numpy array representing a permutation matrix
-
-        Returns:
-            Dictionary mapping PhysicalQubit objects to LogicalQubit objects.
-        """
-        physical_to_logical_mapping = {}
-        for physical_idx, logical_idx in np.argwhere(permutation_matrix):
-            physical_qubit = quariadne.circuit.PhysicalQubit(physical_idx)
-            logical_qubit = quariadne.circuit.LogicalQubit(logical_idx)
-            physical_to_logical_mapping[physical_qubit] = logical_qubit
-        return physical_to_logical_mapping
-
-    def _is_compatible_with_operation(
-        self,
-        permutation_matrix: np.ndarray,
-        operation: quariadne.circuit.QuantumOperation,
-    ) -> bool:
-        """Check if a permutation matrix is compatible with a two-qubit operation.
-
-        Args:
-            permutation_matrix: 2D numpy array representing a permutation matrix
-            operation: QuantumOperation that requires connectivity between its participating qubits
-
-        Returns:
-            True if the permutation allows the operation's qubits to be connected, False otherwise.
-        """
-        # Create the mapping from physical to logical qubits for this permutation
-        physical_to_logical_mapping = self._create_physical_to_logical_mapping(
-            permutation_matrix
-        )
-
-        # Relabel the coupling map to get logical connectivity
-        logical_connectivity = nx.relabel_nodes(
-            self.coupling_map, physical_to_logical_mapping
-        )
-
-        # Check if the operation's participating qubits are connected
-        left_logical, right_logical = operation.qubits_participating
-
-        return logical_connectivity.has_edge(left_logical, right_logical)
-
-    def _build_mapping_from_permutation(
-        self, permutation_matrix: np.ndarray
-    ) -> dict[quariadne.circuit.LogicalQubit, quariadne.circuit.PhysicalQubit]:
-        """Build a logical-to-physical mapping dictionary from a permutation matrix.
-
-        Args:
-            permutation_matrix: 2D numpy array representing a permutation matrix
-
-        Returns:
-            Dictionary mapping LogicalQubit objects to PhysicalQubit objects.
-        """
-        mapping_dict = {}
-        for physical_idx, logical_idx in np.argwhere(permutation_matrix):
-            physical_qubit = quariadne.circuit.PhysicalQubit(physical_idx)
-            logical_qubit = quariadne.circuit.LogicalQubit(logical_idx)
-            mapping_dict[logical_qubit] = physical_qubit
-        return mapping_dict
-
-    def _extract_permutation_for_operation(
-        self,
-        mapping_variables: np.ndarray,
-        operation: quariadne.circuit.QuantumOperation,
-    ) -> np.ndarray:
-        """Extract permutation matrix for a given operation using Birkhoff decomposition.
-
-        Uses Birkhoff-von Neumann decomposition to convert doubly stochastic matrix to
-        permutations and selects the first permutation that satisfies connectivity
-        requirements for the given operation.
-
-        Args:
-            mapping_variables: 2D numpy array representing doubly stochastic mapping matrix
-            operation: QuantumOperation that requires connectivity checking
-
-        Returns:
-            2D numpy array representing the permutation matrix.
-
-        Raises:
-            ValueError: If no compatible permutation found for the operation.
-        """
-        # Perform Birkhoff-von Neumann decomposition
-        coefficient_matrix_pairs = birkhoff_von_neumann_decomposition(mapping_variables)
-
-        # Sort permutations by coefficient in descending order
-        sorted_permutations = sorted(
-            coefficient_matrix_pairs,
-            key=lambda coefficient_matrix_pair: coefficient_matrix_pair[0],
-            reverse=True,
-        )
-
-        # Find the first permutation that satisfies connectivity requirements
-        for coefficient, permutation_matrix in sorted_permutations:
-            if self._is_compatible_with_operation(permutation_matrix, operation):
-                return permutation_matrix
-
-        # If no compatible permutation found, raise an error
-        raise ValueError(f"No compatible permutation found for operation {operation}")
-
-    def _mapping_to_permutation_matrix(
-        self,
-        mapping: dict[quariadne.circuit.LogicalQubit, quariadne.circuit.PhysicalQubit],
-    ) -> np.ndarray:
-        """Convert logical-to-physical mapping dictionary to permutation matrix.
-
-        Args:
-            mapping: Dictionary mapping LogicalQubit objects to PhysicalQubit objects
-
-        Returns:
-            2D numpy array representing the permutation matrix
-        """
-        qubit_count = len(mapping)
-        permutation_matrix = np.zeros((qubit_count, qubit_count))
-
-        for logical_qubit, physical_qubit in mapping.items():
-            permutation_matrix[physical_qubit.index, logical_qubit.index] = 1.0
-
-        return permutation_matrix
-
-    def _accumulate_edge_swaps(
-        self, qubit_movement_variables: np.ndarray
-    ) -> dict[SwapEdge, float]:
-        """Accumulate movement values for each edge from qubit movement variables.
-
-        Args:
-            qubit_movement_variables: Array of qubit movement variables from router result
-
-        Returns:
-            Dictionary mapping edge tuples (from_qubit, to_qubit) to accumulated movement values
-        """
-        swap_edges: dict[SwapEdge, float] = defaultdict(float)
-        defined_movements = np.argwhere(qubit_movement_variables)
-
-        for movement in defined_movements:
-            timestep, logical_qubit, from_qubit, to_qubit = movement.tolist()
-
-            # Only consider actual movements (not self-assignments)
-            if from_qubit != to_qubit:
-                edge_key = (from_qubit, to_qubit)
-                movement_value = qubit_movement_variables[
-                    timestep, logical_qubit, from_qubit, to_qubit
-                ]
-                swap_edges[edge_key] += movement_value
-
-        return swap_edges
-
-    def _create_swaps_from_edges(
-        self, swap_edges: dict[SwapEdge, float]
-    ) -> list[quariadne.circuit.PhysicalSwap]:
-        """Create list of PhysicalSwap objects from accumulated edge movements.
-
-        Args:
-            swap_edges: Dictionary mapping edge tuples to accumulated movement values
-
-        Returns:
-            List of PhysicalSwap objects for movements approximately equal to 1.0
-        """
-        swaps = []
-        for (from_qubit, to_qubit), accumulated_movement_value in swap_edges.items():
-            # Only include movements approximately equal to 1.0
-            if np.isclose(accumulated_movement_value, 1.0):
-                physical_qubit_from = quariadne.circuit.PhysicalQubit(from_qubit)
-                physical_qubit_to = quariadne.circuit.PhysicalQubit(to_qubit)
-                swap = quariadne.circuit.PhysicalSwap(
-                    physical_qubit_from, physical_qubit_to
-                )
-
-                # Add swap if not already present (avoids duplicates through PhysicalSwap equality)
-                if swap not in swaps:
-                    swaps.append(swap)
-
-        return swaps
-
-    def _get_swaps_between_two_permutations(
-        self,
-        previous_permutation: np.ndarray,
-        current_permutation: np.ndarray,
-        previous_operation: quariadne.circuit.QuantumOperation,
-        current_operation: quariadne.circuit.QuantumOperation,
-    ) -> list[quariadne.circuit.PhysicalSwap]:
-        """Calculate swap operations between two consecutive permutations.
-
-        Runs a constrained routing problem with exactly two operations and two fixed
-        permutations to recover the minimal sequence of swaps needed to transition
-        between them.
-
-        Args:
-            previous_permutation: Permutation matrix for the previous operation
-            current_permutation: Permutation matrix for the current operation
-            previous_operation: The previous quantum operation
-            current_operation: The current quantum operation
-
-        Returns:
-            List of PhysicalSwap operations needed to transition between permutations
-        """
-        two_step_permutations = np.array([previous_permutation, current_permutation])
-        two_step_operations = [previous_operation, current_operation]
-        # Run router with both operations and fixed mappings
-        lp_router = MilpScipyRouter(
-            coupling_map=self.coupling_map,
-            two_qubit_operations=two_step_operations,
-            qubits=self.qubits,
-            integrality=CONTINUOUS_VARIABLE_INTEGRALITY,
-            fixed_mapping=two_step_permutations,
-        )
-        lp_result = lp_router.run()
-
-        # Phase 1: Accumulate edge swaps
-        swap_edges = self._accumulate_edge_swaps(lp_result.qubit_movement_variables)
-
-        # Phase 2: Create list of swaps
-        swaps = self._create_swaps_from_edges(swap_edges)
-
-        return swaps
-
-    def _run(self) -> None:
-        """Run the iterative LP routing process to generate sequence of mappings and swaps.
-
-        Implements the iterative routing algorithm:
-        1. Bootstrap: get initial permutation using LP and Birkhoff decomposition
-        2. Iterate through two-qubit operations:
-           - Check compatibility with current permutation
-           - If incompatible, run LP on remaining operations to get next permutation
-           - Calculate swaps between previous and current permutation
-           - Pop the processed operation
-        """
-        # Make a working copy of operations list
-        remaining_operations = self.two_qubit_operations.copy()
-
-        # Bootstrap phase: get initial permutation
-        current_permutation = self._get_initial_permutation()
-        initial_mapping = self._build_mapping_from_permutation(current_permutation)
-        self.mappings = [initial_mapping]
-        self.permutations = [current_permutation]
-
-        # Iterative phase: process operations one by one
-        for operation_index in range(1, len(self.two_qubit_operations)):
-            routed_operation = self.two_qubit_operations[operation_index]
-            previous_operation = self.two_qubit_operations[operation_index - 1]
-            previous_permutation = current_permutation
-
-            # Check if operation is incompatible with current permutation
-            if not self._is_compatible_with_operation(
-                current_permutation, routed_operation
-            ):
-                # Two-qubit operation is not executable, get next permutation
-                next_permutation = self._get_next_permutation(
-                    current_permutation, routed_operation, remaining_operations
-                )
-                next_mapping = self._build_mapping_from_permutation(next_permutation)
-
-                # Calculate swaps between previous and next permutation
-                swaps = self._get_swaps_between_two_permutations(
-                    previous_permutation,
-                    next_permutation,
-                    previous_operation,
-                    routed_operation,
-                )
-                self.swaps_by_operation[operation_index] = swaps
-
-                # Update current permutation and add mapping to list
-                self.mappings.append(next_mapping)
-                self.permutations.append(next_permutation)
-                current_permutation = next_permutation
-            else:
-                # Operation is compatible, no swaps needed
-                self.swaps_by_operation[operation_index] = []
-
-            # Pop the first operation from remaining operations
-            remaining_operations.pop(0)
-
-    def get_initial_mapping(
-        self,
-    ) -> dict[quariadne.circuit.LogicalQubit, quariadne.circuit.PhysicalQubit]:
-        """Get initial mapping from the first permutation.
-
-        Returns:
-            Dictionary mapping LogicalQubit objects to PhysicalQubit objects
-            representing the initial qubit mapping.
-        """
-        return self.mappings[0]
-
-    def get_inserted_swaps(self) -> dict[int, list[quariadne.circuit.PhysicalSwap]]:
-        """Get swap operations inserted after each operation.
-
-        Returns:
-            Dictionary mapping operation indices to lists of PhysicalSwap objects.
-            Each swap list contains swaps needed after executing the operation at that index.
-        """
-        return self.swaps_by_operation
