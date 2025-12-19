@@ -9,6 +9,7 @@ dependencies = [
     "matplotlib>=3.10.3",
     "mypy>=1.16.0",
     "networkx>=3.5",
+    "notebook>=7.4.7",
     "pydot>=4.0.1",
     "pylatexenc>=2.10",
     "qiskit>=2.0.1",
@@ -16,14 +17,18 @@ dependencies = [
     "ruff>=0.11.12",
 ]
 
-[project.entry-points."qiskit.transpiler.layout"]
+[project.entry-points.'qiskit.transpiler.layout']
 "quariadne_ilp" = "quariadne.qiskit_passes:QuariadneIlpLayoutPlugin"
-"quariadne_lp" = "quariadne.qiskit_passes:QuariadneLpLayoutPlugin"
+"quariadne_lpm" = "quariadne.qiskit_passes:QuariadneLpLayoutPlugin"
+"quariadne_lpe" = "quariadne.qiskit_passes:QuariadneEdgeLayoutPlugin"
+
 
 
 [project.entry-points."qiskit.transpiler.routing"]
 "quariadne_ilp" = "quariadne.qiskit_passes:QuariadneIlpRoutingPlugin"
-"quariadne_lp" = "quariadne.qiskit_passes:QuariadneLpRoutingPlugin"
+"quariadne_lpm" = "quariadne.qiskit_passes:QuariadneLpRoutingPlugin"
+"quariadne_lpe" = "quariadne.qiskit_passes:QuariadneEdgeRoutingPlugin"
+
 
 
 [tool.uv]
