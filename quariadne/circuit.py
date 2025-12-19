@@ -79,10 +79,11 @@ class PhysicalSwap:
         return hash(frozenset([self.first, self.second]))
 
 
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True, eq=False)
 class QuantumOperation:
     """This is a class, which encapsulates the resolved quantum operation
     (think of it in terms of QCM), providing necessary information about it.
+    They are always unique, for making the quantum circuit abstraction valid.
 
     Attributes:
         name: The operation name, usually something simple
