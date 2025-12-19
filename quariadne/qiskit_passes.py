@@ -1,7 +1,7 @@
 from typing import List, Dict, Union
 from enum import Enum
 import quariadne.computational_graph
-import quariadne.milp_router
+import quariadne.milp
 import quariadne.circuit
 import qiskit.transpiler
 import qiskit.dagcircuit
@@ -10,8 +10,7 @@ from qiskit.transpiler.preset_passmanagers.plugin import PassManagerStagePlugin
 from qiskit.transpiler.preset_passmanagers.common import generate_embed_passmanager
 from qiskit.transpiler import PassManager
 
-
-type MilpRouter = quariadne.milp_router.IlpRouter | quariadne.milp_router.LpRouter
+import quariadne.routers
 
 
 class RoutingMode(Enum):
@@ -20,10 +19,12 @@ class RoutingMode(Enum):
     Attributes:
         ILP: Integer Linear Program with integer constraints
         LP: Linear Program with continuous variables and Birkhoff decomposition
+        EDGE: Linear Program with edge-based bipartite matching
     """
 
     ILP = "ilp"
     LP = "lp"
+    EDGE = "edge"
 
 
 class MilpLayout(qiskit.transpiler.AnalysisPass):
@@ -50,9 +51,7 @@ class MilpLayout(qiskit.transpiler.AnalysisPass):
             self.target = None
             self.coupling_map = coupling_map
 
-        self.coupling_graph = quariadne.milp_router.get_coupling_graph(
-            self.coupling_map
-        )
+        self.coupling_graph = quariadne.milp.get_coupling_graph(self.coupling_map)
 
     def _convert_dag_to_circuit(
         self, dag: qiskit.dagcircuit.DAGCircuit
@@ -121,13 +120,15 @@ class MilpLayout(qiskit.transpiler.AnalysisPass):
         # Convert to internal representation and solve using appropriate router
         quariadne_circuit = self._convert_dag_to_circuit(dag)
 
-        router: MilpRouter
+        router: quariadne.routers.Router
         if self.mode == RoutingMode.ILP:
-            router = quariadne.milp_router.IlpRouter(
+            router = quariadne.routers.IlpRouter(self.coupling_graph, quariadne_circuit)
+        elif self.mode == RoutingMode.LP:
+            router = quariadne.routers.LpRouterMapping(
                 self.coupling_graph, quariadne_circuit
             )
-        elif self.mode == RoutingMode.LP:
-            router = quariadne.milp_router.LpRouter(
+        elif self.mode == RoutingMode.EDGE:
+            router = quariadne.routers.LpRouterEdges(
                 self.coupling_graph, quariadne_circuit
             )
         else:
@@ -256,30 +257,29 @@ class MilpRouting(qiskit.transpiler.TransformationPass):
         )
         current_layout = trivial_layout.copy()
 
-        two_qubit_idx = 0
-        # Process each layer and insert SWAPs as determined by MILP
-        for layer in dag.serial_layers():
+        layer_idx = 0
+        # Process each parallel layer and insert SWAPs after layers
+        for layer in dag.layers():
             subdag = layer["graph"]
 
-            # Insert SWAPs before processing gates if required at this timestep
-            for gate in subdag.two_qubit_ops():
-                if two_qubit_idx in swap_pairs_by_timestep:
-                    swaps = swap_pairs_by_timestep[two_qubit_idx]
-                    # Create and insert SWAP operations
-                    swap_dag = self._create_swap_dag(
-                        canonical_register, current_layout, swaps
-                    )
-                    order = current_layout.reorder_bits(new_dag.qubits)
-                    new_dag.compose(swap_dag, qubits=order)
-
-                    # Update layout state after SWAPs
-                    current_layout = self._apply_swaps_to_layout(current_layout, swaps)
-
-                two_qubit_idx += 1
-
-            # Add the original layer operations
+            # Add the entire parallel layer first
             order = current_layout.reorder_bits(new_dag.qubits)
             new_dag.compose(subdag, qubits=order)
+
+            # Insert SWAPs after layer if they exist
+            if layer_idx in swap_pairs_by_timestep:
+                swaps = swap_pairs_by_timestep[layer_idx]
+                # Create and insert SWAP operations
+                swap_dag = self._create_swap_dag(
+                    canonical_register, current_layout, swaps
+                )
+                order = current_layout.reorder_bits(new_dag.qubits)
+                new_dag.compose(swap_dag, qubits=order)
+
+                # Update layout state after SWAPs
+                current_layout = self._apply_swaps_to_layout(current_layout, swaps)
+
+            layer_idx += 1
 
         # Update final layout state in property set
         if self.property_set["final_layout"] is None:
@@ -393,6 +393,61 @@ class QuariadneLpRoutingPlugin(PassManagerStagePlugin):
         """
         routing_pm = PassManager()
         # Add LP routing pass
+        routing_pm.append(MilpRouting(pass_manager_config.coupling_map))
+
+        return routing_pm
+
+
+class QuariadneEdgeLayoutPlugin(PassManagerStagePlugin):
+    """PassManager stage plugin for Edge-based layout optimisation with bipartite matching."""
+
+    def pass_manager(self, pass_manager_config, optimization_level=None):
+        """Generate PassManager for Edge layout stage.
+
+        Args:
+            pass_manager_config: Pass manager configuration object
+            optimization_level: Optimisation level (0-3)
+
+        Returns:
+            PassManager for Edge layout stage
+        """
+        layout_pm = PassManager()
+
+        # Add Edge layout pass
+        if (
+            hasattr(pass_manager_config, "target")
+            and pass_manager_config.target is not None
+        ):
+            layout_pm.append(
+                MilpLayout(pass_manager_config.target, mode=RoutingMode.EDGE)
+            )
+        else:
+            layout_pm.append(
+                MilpLayout(pass_manager_config.coupling_map, mode=RoutingMode.EDGE)
+            )
+
+        # Embed the layout using generate_embed_passmanager
+        embed_pm = generate_embed_passmanager(pass_manager_config.coupling_map)
+        layout_pm += embed_pm
+
+        return layout_pm
+
+
+class QuariadneEdgeRoutingPlugin(PassManagerStagePlugin):
+    """PassManager stage plugin for Edge-based routing optimisation with bipartite matching."""
+
+    def pass_manager(self, pass_manager_config, optimization_level=None):
+        """Generate PassManager for Edge routing stage.
+
+        Args:
+            pass_manager_config: Pass manager configuration object
+            optimization_level: Optimisation level (0-3)
+
+        Returns:
+            PassManager for Edge routing stage
+        """
+        routing_pm = PassManager()
+        # Add Edge routing pass
         routing_pm.append(MilpRouting(pass_manager_config.coupling_map))
 
         return routing_pm
