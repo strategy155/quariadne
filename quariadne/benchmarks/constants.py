@@ -69,6 +69,27 @@ class QuekoCategory(StrEnum):
 
 
 # -----------------------------------------------------------------------------
+# Layout Methods
+# -----------------------------------------------------------------------------
+
+
+class LayoutMethod(StrEnum):
+    """Qiskit layout methods for initial qubit placement.
+
+    Reference: https://docs.quantum.ibm.com/api/qiskit/qiskit.transpiler.generate_preset_pass_manager
+
+    Attributes:
+        TRIVIAL: Identity mapping, no optimisation
+        DENSE: Places qubits on well-connected physical qubits
+        SABRE: SABRE-based layout optimisation
+    """
+
+    TRIVIAL = "trivial"
+    DENSE = "dense"
+    SABRE = "sabre"
+
+
+# -----------------------------------------------------------------------------
 # Routing Methods
 # -----------------------------------------------------------------------------
 
@@ -97,6 +118,26 @@ class RoutingMethod(StrEnum):
     SABRE = "sabre"
     BASIC = "basic"
     LOOKAHEAD = "lookahead"
+
+    @property
+    def layout_method(self) -> str:
+        """Return the matching layout method for benchmark integrity.
+
+        Quariadne methods use their matching layout plugin (same name).
+        sabre routing uses sabre layout; basic/lookahead use trivial layout.
+        """
+        if self in (
+            RoutingMethod.QUARIADNE_ILP,
+            RoutingMethod.QUARIADNE_LPM,
+            RoutingMethod.QUARIADNE_LPE,
+        ):
+            layout = self.value
+        elif self == RoutingMethod.SABRE:
+            layout = LayoutMethod.SABRE.value
+        else:
+            layout = LayoutMethod.TRIVIAL.value
+
+        return layout
 
 
 # -----------------------------------------------------------------------------

@@ -129,12 +129,14 @@ def transpile_queko_circuit(
     # Load circuit from QASM
     queko_qiskit_circuit = qiskit.qasm2.load(queko_circuit_filepath)
 
-    # Create pass manager with routing method used for both routing and layout
+    # Create pass manager with routing and matching layout method
+    # Reference: https://docs.quantum.ibm.com/api/qiskit/qiskit.transpiler.generate_preset_pass_manager
+    queko_layout_method = queko_routing_method.layout_method
     queko_pass_manager = qiskit.transpiler.generate_preset_pass_manager(
         coupling_map=queko_backend_coupling_map,
         optimization_level=bench_const.DEFAULT_OPTIMISATION_LEVEL,
         routing_method=queko_routing_method,
-        layout_method=queko_routing_method,
+        layout_method=queko_layout_method,
     )
 
     queko_transpiled_circuit = queko_pass_manager.run(queko_qiskit_circuit)
