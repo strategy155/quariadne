@@ -13,7 +13,6 @@ See: https://ergo-code.github.io/HiGHS/dev/interfaces/python/
 from __future__ import annotations
 
 import copy
-from collections import defaultdict
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING
@@ -67,23 +66,29 @@ class BipartiteAllocationResult:
     """Result container for bipartite allocation LP optimisation.
 
     Contains the solution mapping operations to edges and the derived
-    initial qubit mapping and swap sequence.
+    initial qubit mapping. The swap sequence is computed by the routing pass
+    based on the actual DAG iteration order.
 
     Attributes:
         objective_value: The optimal objective value (total distance)
         operation_edge_assignment: Dict mapping operation index to assigned edge
+        operation_to_edge_by_qubits: Dict mapping (qubit1, qubit2, occurrence) to edge
         initial_mapping: Initial logical-to-physical qubit mapping
-        swap_sequence: List of swap operations needed between operations
+        operations: List of operations in LP order for reference
     """
 
     objective_value: float
     operation_edge_assignment: dict[
         int, tuple[quariadne.circuit.PhysicalQubit, quariadne.circuit.PhysicalQubit]
     ]
+    operation_to_edge_by_qubits: dict[
+        tuple[int, int, int],
+        tuple[quariadne.circuit.PhysicalQubit, quariadne.circuit.PhysicalQubit],
+    ]
     initial_mapping: dict[
         quariadne.circuit.LogicalQubit, quariadne.circuit.PhysicalQubit
     ]
-    swap_sequence: dict[int, list[quariadne.circuit.PhysicalSwap]]
+    operations: list[quariadne.circuit.QuantumOperation]
 
 
 def get_coupling_graph(coupling_map: qiskit.transpiler.CouplingMap) -> nx.DiGraph:
@@ -205,16 +210,28 @@ class BipartiteAllocationRouter:
         elif routed_circuit_qubit_count > self.coupling_map.number_of_nodes():
             raise TypeError("Circuit has more qubits than available on hardware!")
 
+    # Operations that are markers/directives and should be ignored for routing
+    NON_GATE_OPERATIONS = frozenset({"barrier", "measure", "reset", "delay"})
+
     def _get_two_qubit_operations(
         self,
     ) -> list[quariadne.circuit.QuantumOperation]:
-        """Extract two-qubit operations from the quantum circuit."""
+        """Extract two-qubit operations from the quantum circuit.
+
+        Filters out single-qubit gates, barrier/measure/reset directives,
+        and returns only actual two-qubit gate operations that require routing.
+        """
         two_qubit_operations = []
         for operation in self.routed_circuit.operations:
+            # Skip non-gate operations (barriers, measurements, etc.)
+            if operation.name in self.NON_GATE_OPERATIONS:
+                continue
             if len(operation.qubits_participating) == 2:
                 two_qubit_operations.append(operation)
             elif len(operation.qubits_participating) > 2:
-                raise TypeError("Operations with more than 2 qubits not supported!")
+                raise TypeError(
+                    f"Operations with more than 2 qubits not supported: {operation.name}"
+                )
         return two_qubit_operations
 
     def _compute_distance_matrix(
@@ -582,19 +599,35 @@ class BipartiteAllocationRouter:
                     operation_edge_assignment[op_idx] = self.edges[edge_idx]
                     break
 
+        # Build operation_to_edge_by_qubits for lookup by qubit pair
+        # Key: (qubit1_idx, qubit2_idx, occurrence_count)
+        operation_to_edge_by_qubits: dict[
+            tuple[int, int, int],
+            tuple[quariadne.circuit.PhysicalQubit, quariadne.circuit.PhysicalQubit],
+        ] = {}
+        qubit_pair_counts: dict[tuple[int, int], int] = {}
+
+        for op_idx in range(self.operation_count):
+            operation = self.operations[op_idx]
+            q1, q2 = operation.qubits_participating
+            key_pair = (q1.index, q2.index)
+
+            occurrence = qubit_pair_counts.get(key_pair, 0)
+            qubit_pair_counts[key_pair] = occurrence + 1
+
+            full_key = (q1.index, q2.index, occurrence)
+            if op_idx in operation_edge_assignment:
+                operation_to_edge_by_qubits[full_key] = operation_edge_assignment[op_idx]
+
         # Derive initial mapping using bipartite matching for unique positions
         initial_mapping = self._derive_initial_mapping(operation_edge_assignment)
-
-        # Derive swap sequence from solution (includes pre-first-op swaps)
-        swap_sequence = self._derive_swap_sequence(
-            operation_edge_assignment, col_values, initial_mapping
-        )
 
         return BipartiteAllocationResult(
             objective_value=objective_value,
             operation_edge_assignment=operation_edge_assignment,
+            operation_to_edge_by_qubits=operation_to_edge_by_qubits,
             initial_mapping=initial_mapping,
-            swap_sequence=swap_sequence,
+            operations=list(self.operations),
         )
 
     def _derive_initial_mapping(
@@ -672,85 +705,6 @@ class BipartiteAllocationRouter:
 
         return initial_mapping
 
-    def _derive_swap_sequence(
-        self,
-        operation_edge_assignment: dict[
-            int, tuple[quariadne.circuit.PhysicalQubit, quariadne.circuit.PhysicalQubit]
-        ],
-        col_values: list[float],
-        initial_mapping: dict[
-            quariadne.circuit.LogicalQubit, quariadne.circuit.PhysicalQubit
-        ],
-    ) -> dict[int, list[quariadne.circuit.PhysicalSwap]]:
-        """Derive the swap sequence from the LP solution.
-
-        This method analyses the flow variables to determine what swaps are needed
-        between consecutive operations, including swaps before the first operation
-        to move qubits from initial positions to their required positions.
-
-        Args:
-            operation_edge_assignment: Mapping from operation index to assigned edge
-            col_values: Solution values from HiGHS
-            initial_mapping: Initial logical-to-physical mapping
-
-        Returns:
-            Dictionary mapping operation index to list of swaps needed before it
-        """
-        swap_sequence: dict[int, list[quariadne.circuit.PhysicalSwap]] = defaultdict(
-            list
-        )
-
-        # Add swaps before first operation for each qubit
-        # (to move from initial_mapping position to desired first-op position)
-        for qubit, op_info in self.qubit_operations.items():
-            if op_info.operation_indices:
-                first_op = op_info.operation_indices[0]
-                if first_op in operation_edge_assignment:
-                    edge = operation_edge_assignment[first_op]
-                    desired_pos = self._get_qubit_position_in_edge(
-                        qubit, first_op, edge
-                    )
-                    initial_pos = initial_mapping.get(qubit)
-
-                    if initial_pos is not None and initial_pos != desired_pos:
-                        # Need swaps to move from initial to desired position
-                        path = nx.shortest_path(
-                            self.coupling_map.to_undirected(), initial_pos, desired_pos
-                        )
-                        for i in range(len(path) - 1):
-                            swap = quariadne.circuit.PhysicalSwap(path[i], path[i + 1])
-                            if swap not in swap_sequence[first_op]:
-                                swap_sequence[first_op].append(swap)
-
-        # Process transitions between operations to find required swaps
-        for trans_idx, transition in enumerate(self.flow_transitions):
-            qubit = transition.qubit
-            from_op = transition.from_operation_index
-            to_op = transition.to_operation_index
-
-            if (
-                from_op in operation_edge_assignment
-                and to_op in operation_edge_assignment
-            ):
-                from_edge = operation_edge_assignment[from_op]
-                to_edge = operation_edge_assignment[to_op]
-
-                from_pos = self._get_qubit_position_in_edge(qubit, from_op, from_edge)
-                to_pos = self._get_qubit_position_in_edge(qubit, to_op, to_edge)
-
-                # If positions differ, we need swaps
-                if from_pos != to_pos:
-                    # Find the path and create swap operations
-                    path = nx.shortest_path(
-                        self.coupling_map.to_undirected(), from_pos, to_pos
-                    )
-                    for i in range(len(path) - 1):
-                        swap = quariadne.circuit.PhysicalSwap(path[i], path[i + 1])
-                        if swap not in swap_sequence[to_op]:
-                            swap_sequence[to_op].append(swap)
-
-        return dict(swap_sequence)
-
     def run(self) -> BipartiteAllocationResult:
         """Run the bipartite allocation LP optimisation.
 
@@ -766,8 +720,9 @@ class BipartiteAllocationRouter:
             return BipartiteAllocationResult(
                 objective_value=0.0,
                 operation_edge_assignment={},
+                operation_to_edge_by_qubits={},
                 initial_mapping=trivial_mapping,
-                swap_sequence={},
+                operations=[],
             )
 
         # Build and solve the model

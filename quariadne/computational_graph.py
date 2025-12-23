@@ -138,14 +138,14 @@ class ComputationalDAG:
     @staticmethod
     def _convert_qiskit_dag_node(
         qiskit_dag_node: QiskitDAGNode,
-    ) -> ComputationalNode:
+    ) -> ComputationalNode | None:
         """Convert a Qiskit DAG node to the corresponding Quariadne node.
 
         Args:
             qiskit_dag_node: A Qiskit DAG node to convert to internal classes.
 
         Returns:
-            The corresponding Quariadne computational node.
+            The corresponding Quariadne computational node, or None for classical wires.
 
         Raises:
             TypeError: If an unexpected node type is encountered.
@@ -170,6 +170,9 @@ class ComputationalDAG:
                     qiskit.dagcircuit.DAGInNode | qiskit.dagcircuit.DAGOutNode
                 ) as qiskit_node_type
             ):
+                # Skip classical wires (Clbit) - only process quantum wires (Qubit)
+                if not isinstance(qiskit_dag_node.wire, qiskit.circuit.Qubit):
+                    return None
                 qubit_index = qiskit_dag_node.wire._index
                 underlying_qubit = quariadne.circuit.LogicalQubit(qubit_index)
                 # here we map the ending-starting parts of the dag to our nod eclasses
@@ -186,17 +189,20 @@ class ComputationalDAG:
     def _convert_qiskit_dag_edge(
         cls,
         qiskit_dag_edge: QiskitDAGEdge,
-    ) -> Transition:
+    ) -> Transition | None:
         """Convert a Qiskit DAG edge to a properly constructed transition object.
 
         Args:
             qiskit_dag_edge: A Qiskit DAG edge object tuple.
 
         Returns:
-            The corresponding transition for the routing circuit.
+            The corresponding transition for the routing circuit, or None for classical wires.
         """
         # unpacking the meaningful objects
         in_node, out_node, wire = qiskit_dag_edge
+        # Skip classical wires - only process quantum wires
+        if not isinstance(wire, qiskit.circuit.Qubit):
+            return None
         # mapping process here
         wire_index = wire._index
         underlying_qubit = quariadne.circuit.LogicalQubit(wire_index)
@@ -221,16 +227,18 @@ class ComputationalDAG:
         random_dag_edges = qiskit_dag.edges()
 
         # preparing the arrays for nodes and transitions, then iterating through the corresponding qiskit generators
-        # and filling the helper arrays
+        # and filling the helper arrays (filtering out None values from classical wires)
         circuit_nodes = []
         circuit_transitions = []
         for node in random_dag_nodes:
             circuit_node = cls._convert_qiskit_dag_node(node)
-            circuit_nodes.append(circuit_node)
+            if circuit_node is not None:
+                circuit_nodes.append(circuit_node)
 
         for edge in random_dag_edges:
             circuit_transition = cls._convert_qiskit_dag_edge(edge)
-            circuit_transitions.append(circuit_transition)
+            if circuit_transition is not None:
+                circuit_transitions.append(circuit_transition)
 
         # forming a resulting routing representation
 
@@ -315,21 +323,20 @@ class ComputationalDAG:
     def to_abstract_quantum_circuit(self) -> "quariadne.circuit.AbstractQuantumCircuit":
         """Convert the computational DAG to an AbstractQuantumCircuit.
 
-        Filters out WireStart and WireEnd nodes, keeping only Gate nodes,
-        and uses topological sorting to generate the chronological sequence of operations.
+        Filters out WireStart and WireEnd nodes, keeping only Gate nodes.
+        Preserves the original circuit order by using the order nodes appear in self.nodes.
 
         Returns:
-            AbstractQuantumCircuit: The converted circuit with operations in topological order.
+            AbstractQuantumCircuit: The converted circuit with operations in original order.
         """
-        nx_dag = self.to_nx()
-
         qubits = []
         for node in self.nodes:
             if isinstance(node, WireStart):
                 qubits.append(node.qubit)
 
+        # Preserve original order by iterating through nodes as they were added
         operations = []
-        for node in nx.topological_sort(nx_dag):
+        for node in self.nodes:
             if isinstance(node, Gate):
                 operations.append(node.operation)
 
