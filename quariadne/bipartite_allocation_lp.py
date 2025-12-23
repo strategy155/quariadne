@@ -1,0 +1,782 @@
+"""Bipartite Allocation LP Router for quantum circuit routing.
+
+This module implements a Linear Programming formulation for the token allocation
+problem in quantum circuit routing using bipartite matching concepts.
+
+The formulation uses:
+- y_{o,e} variables: binary assignment of operation o to directed edge e
+- z^l_{o,e',e} variables: flow linking previous edge e' to current edge e for qubit l
+
+See: https://ergo-code.github.io/HiGHS/dev/interfaces/python/
+"""
+
+from __future__ import annotations
+
+import copy
+from collections import defaultdict
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import TYPE_CHECKING
+
+import highspy
+import networkx as nx
+
+import quariadne.circuit
+
+if TYPE_CHECKING:
+    import qiskit.transpiler
+
+
+class BipartiteVariableType(Enum):
+    """Enum for variable types in the bipartite allocation LP."""
+
+    OPERATION_EDGE = "operation_edge"  # y_{o,e}
+    FLOW = "flow"  # z^l_{o,e',e}
+
+
+@dataclass
+class QubitOperationInfo:
+    """Tracks which operations involve each qubit and their ordering.
+
+    Attributes:
+        qubit: The logical qubit being tracked
+        operation_indices: List of operation indices involving this qubit (in order)
+    """
+
+    qubit: quariadne.circuit.LogicalQubit
+    operation_indices: list[int] = field(default_factory=list)
+
+
+@dataclass
+class FlowTransition:
+    """Represents a flow transition for a qubit between consecutive operations.
+
+    Attributes:
+        qubit: The logical qubit transitioning
+        from_operation_index: The previous operation index involving this qubit
+        to_operation_index: The current operation index involving this qubit
+    """
+
+    qubit: quariadne.circuit.LogicalQubit
+    from_operation_index: int
+    to_operation_index: int
+
+
+@dataclass
+class BipartiteAllocationResult:
+    """Result container for bipartite allocation LP optimisation.
+
+    Contains the solution mapping operations to edges and the derived
+    initial qubit mapping and swap sequence.
+
+    Attributes:
+        objective_value: The optimal objective value (total distance)
+        operation_edge_assignment: Dict mapping operation index to assigned edge
+        initial_mapping: Initial logical-to-physical qubit mapping
+        swap_sequence: List of swap operations needed between operations
+    """
+
+    objective_value: float
+    operation_edge_assignment: dict[
+        int, tuple[quariadne.circuit.PhysicalQubit, quariadne.circuit.PhysicalQubit]
+    ]
+    initial_mapping: dict[
+        quariadne.circuit.LogicalQubit, quariadne.circuit.PhysicalQubit
+    ]
+    swap_sequence: dict[int, list[quariadne.circuit.PhysicalSwap]]
+
+
+def get_coupling_graph(coupling_map: qiskit.transpiler.CouplingMap) -> nx.DiGraph:
+    """Convert IBM coupling map to NetworkX DiGraph coupling map.
+
+    Converts a Qiskit CouplingMap object to a NetworkX DiGraph using
+    Quariadne's PhysicalQubit representation for nodes and edges.
+
+    Args:
+        coupling_map: Qiskit CouplingMap object representing physical qubit
+                     connectivity (e.g., backend.coupling_map)
+
+    Returns:
+        NetworkX DiGraph with PhysicalQubit nodes and edges representing
+        physical qubit connectivity on the hardware backend.
+    """
+    coupling_graph_nx: nx.DiGraph[quariadne.circuit.PhysicalQubit] = nx.DiGraph()
+
+    coupling_map_qubits = coupling_map.physical_qubits
+    physical_qubits = tuple(
+        quariadne.circuit.PhysicalQubit(coupling_map_qubit)
+        for coupling_map_qubit in coupling_map_qubits
+    )
+
+    coupling_map_edgelist = coupling_map.graph.edge_list()
+    physical_qubits_connections = tuple(
+        (
+            quariadne.circuit.PhysicalQubit(coupling_map_from),
+            quariadne.circuit.PhysicalQubit(coupling_map_to),
+        )
+        for coupling_map_from, coupling_map_to in coupling_map_edgelist
+    )
+
+    coupling_graph_nx.add_nodes_from(physical_qubits)
+    coupling_graph_nx.add_edges_from(physical_qubits_connections)
+
+    return coupling_graph_nx
+
+
+class BipartiteAllocationRouter:
+    """Linear Programming router using bipartite matching formulation.
+
+    Implements an LP-based approach where operations are matched to coupling edges
+    with flow conservation constraints tracking qubit positions.
+
+    Mathematical Formulation:
+        Variables:
+            y_{o,e} ∈ {0,1}: operation o assigned to directed edge e
+            z^l_{o,e',e} ≥ 0: flow from edge e' to edge e for qubit l at operation o
+
+        Constraints:
+            Σ_e y_{o,e} = 1              (each operation on exactly one edge)
+            Σ_o y_{o,e} ≤ 1 per layer    (each edge used at most once per layer)
+            Flow conservation on z linking consecutive y's
+
+        Objective:
+            Minimise Σ dist(pos_l(e'), pos_l(e)) · z^l_{o,e',e}
+            where pos_l(e) is the endpoint of edge e where qubit l sits
+
+    Attributes:
+        coupling_map: NetworkX DiGraph representing hardware connectivity
+        routed_circuit: Abstract quantum circuit to be routed
+        operations: List of two-qubit operations to route
+        edges: List of directed edges in the coupling map
+        distance_matrix: Shortest path distances between physical qubits
+    """
+
+    def __init__(
+        self,
+        coupling_map: nx.DiGraph,
+        quantum_circuit: quariadne.circuit.AbstractQuantumCircuit,
+    ) -> None:
+        """Initialise the bipartite allocation router.
+
+        Args:
+            coupling_map: NetworkX DiGraph representing physical qubit connectivity
+            quantum_circuit: Abstract quantum circuit to be routed
+        """
+        self.coupling_map = coupling_map
+        self.qubit_count = coupling_map.number_of_nodes()
+        self.routed_circuit = copy.deepcopy(quantum_circuit)
+
+        self._add_dummy_qubits()
+
+        self.operations = self._get_two_qubit_operations()
+        self.operation_count = len(self.operations)
+
+        self.edges = list(self.coupling_map.edges())
+        self.edge_count = len(self.edges)
+
+        # Build edge index mapping for quick lookup
+        self.edge_to_index: dict[
+            tuple[quariadne.circuit.PhysicalQubit, quariadne.circuit.PhysicalQubit], int
+        ] = {edge: idx for idx, edge in enumerate(self.edges)}
+
+        # Compute shortest path distances for objective function
+        self.distance_matrix = self._compute_distance_matrix()
+
+        # Build qubit operation tracking
+        self.qubit_operations = self._build_qubit_operation_map()
+
+        # Build flow transitions (pairs of consecutive operations for each qubit)
+        self.flow_transitions = self._build_flow_transitions()
+
+        # Variable indexing setup
+        self._setup_variable_indexing()
+
+    def _add_dummy_qubits(self) -> None:
+        """Add dummy logical qubits to match hardware qubit count."""
+        routed_circuit_qubit_count = len(self.routed_circuit.qubits)
+        if routed_circuit_qubit_count < self.coupling_map.number_of_nodes():
+            dummy_logical_qubits = tuple(
+                quariadne.circuit.LogicalQubit(dummy_index)
+                for dummy_index in range(routed_circuit_qubit_count, self.qubit_count)
+            )
+            self.routed_circuit.qubits = (
+                self.routed_circuit.qubits + dummy_logical_qubits
+            )
+        elif routed_circuit_qubit_count > self.coupling_map.number_of_nodes():
+            raise TypeError("Circuit has more qubits than available on hardware!")
+
+    def _get_two_qubit_operations(
+        self,
+    ) -> list[quariadne.circuit.QuantumOperation]:
+        """Extract two-qubit operations from the quantum circuit."""
+        two_qubit_operations = []
+        for operation in self.routed_circuit.operations:
+            if len(operation.qubits_participating) == 2:
+                two_qubit_operations.append(operation)
+            elif len(operation.qubits_participating) > 2:
+                raise TypeError("Operations with more than 2 qubits not supported!")
+        return two_qubit_operations
+
+    def _compute_distance_matrix(
+        self,
+    ) -> dict[
+        tuple[quariadne.circuit.PhysicalQubit, quariadne.circuit.PhysicalQubit], float
+    ]:
+        """Compute shortest path distances between all pairs of physical qubits.
+
+        Uses NetworkX's shortest path algorithm on the undirected version of the
+        coupling graph to find distances.
+
+        Returns:
+            Dictionary mapping (source, target) qubit pairs to their shortest distance
+        """
+        # Convert to undirected for distance calculation (SWAPs are bidirectional)
+        undirected_coupling = self.coupling_map.to_undirected()
+
+        distance_dict: dict[
+            tuple[quariadne.circuit.PhysicalQubit, quariadne.circuit.PhysicalQubit],
+            float,
+        ] = {}
+
+        # Compute all-pairs shortest paths
+        all_pairs_lengths = dict(nx.all_pairs_shortest_path_length(undirected_coupling))
+
+        for source_qubit in self.coupling_map.nodes:
+            for target_qubit in self.coupling_map.nodes:
+                if target_qubit in all_pairs_lengths[source_qubit]:
+                    distance_dict[(source_qubit, target_qubit)] = all_pairs_lengths[
+                        source_qubit
+                    ][target_qubit]
+                else:
+                    # Disconnected graph case
+                    distance_dict[(source_qubit, target_qubit)] = float("inf")
+
+        return distance_dict
+
+    def _build_qubit_operation_map(
+        self,
+    ) -> dict[quariadne.circuit.LogicalQubit, QubitOperationInfo]:
+        """Build mapping from logical qubits to their participating operations.
+
+        Returns:
+            Dictionary mapping each logical qubit to its operation tracking info
+        """
+        qubit_ops: dict[quariadne.circuit.LogicalQubit, QubitOperationInfo] = {}
+
+        for qubit in self.routed_circuit.qubits:
+            qubit_ops[qubit] = QubitOperationInfo(qubit=qubit)
+
+        for op_idx, operation in enumerate(self.operations):
+            for qubit in operation.qubits_participating:
+                qubit_ops[qubit].operation_indices.append(op_idx)
+
+        return qubit_ops
+
+    def _build_flow_transitions(self) -> list[FlowTransition]:
+        """Build list of flow transitions for the LP formulation.
+
+        For each qubit, creates transitions between consecutive operations
+        involving that qubit.
+
+        Returns:
+            List of FlowTransition objects representing all z variable indices
+        """
+        transitions = []
+
+        for qubit, op_info in self.qubit_operations.items():
+            op_indices = op_info.operation_indices
+            # Create transitions between consecutive operations
+            for i in range(1, len(op_indices)):
+                from_op = op_indices[i - 1]
+                to_op = op_indices[i]
+                transitions.append(
+                    FlowTransition(
+                        qubit=qubit,
+                        from_operation_index=from_op,
+                        to_operation_index=to_op,
+                    )
+                )
+
+        return transitions
+
+    def _setup_variable_indexing(self) -> None:
+        """Set up variable indexing for the LP formulation.
+
+        Variables are laid out as:
+            [y_{0,0}, y_{0,1}, ..., y_{O-1,E-1}, z^{l1}_{...}, z^{l2}_{...}, ...]
+
+        where O is operation count and E is edge count.
+        """
+        # y variables: operation_count × edge_count
+        self.y_var_count = self.operation_count * self.edge_count
+        self.y_var_offset = 0
+
+        # z variables: for each transition, edge_count × edge_count possibilities
+        # But we only need z variables for valid (e', e) pairs
+        self.z_var_count = (
+            len(self.flow_transitions) * self.edge_count * self.edge_count
+        )
+        self.z_var_offset = self.y_var_count
+
+        self.total_var_count = self.y_var_count + self.z_var_count
+
+        # Build transition index mapping
+        self.transition_to_index: dict[tuple[int, int, int], int] = {}
+        for idx, trans in enumerate(self.flow_transitions):
+            key = (
+                trans.qubit.index,
+                trans.from_operation_index,
+                trans.to_operation_index,
+            )
+            self.transition_to_index[key] = idx
+
+    def _get_y_var_index(self, operation_index: int, edge_index: int) -> int:
+        """Get the variable index for y_{operation, edge}.
+
+        Args:
+            operation_index: Index of the operation
+            edge_index: Index of the edge
+
+        Returns:
+            Variable index in the LP formulation
+        """
+        return self.y_var_offset + operation_index * self.edge_count + edge_index
+
+    def _get_z_var_index(
+        self, transition_index: int, from_edge_index: int, to_edge_index: int
+    ) -> int:
+        """Get the variable index for z^l_{o, e', e}.
+
+        Args:
+            transition_index: Index of the flow transition
+            from_edge_index: Index of the source edge (e')
+            to_edge_index: Index of the target edge (e)
+
+        Returns:
+            Variable index in the LP formulation
+        """
+        z_local_idx = (
+            transition_index * self.edge_count * self.edge_count
+            + from_edge_index * self.edge_count
+            + to_edge_index
+        )
+        return self.z_var_offset + z_local_idx
+
+    def _get_qubit_position_in_edge(
+        self,
+        qubit: quariadne.circuit.LogicalQubit,
+        operation_index: int,
+        edge: tuple[quariadne.circuit.PhysicalQubit, quariadne.circuit.PhysicalQubit],
+    ) -> quariadne.circuit.PhysicalQubit:
+        """Get the physical position of a qubit when operation uses given edge.
+
+        For a two-qubit operation on logical qubits (l1, l2) assigned to directed
+        edge (p1, p2): l1 sits at p1, l2 sits at p2.
+
+        Args:
+            qubit: The logical qubit to locate
+            operation_index: Index of the operation
+            edge: The directed edge (source, target)
+
+        Returns:
+            Physical qubit position where the logical qubit sits
+        """
+        operation = self.operations[operation_index]
+        left_qubit, right_qubit = operation.qubits_participating
+        left_physical, right_physical = edge
+
+        if qubit == left_qubit:
+            return left_physical
+        elif qubit == right_qubit:
+            return right_physical
+        else:
+            raise ValueError(f"Qubit {qubit} not in operation {operation_index}")
+
+    def _build_model(self) -> highspy.Highs:
+        """Build the HiGHS LP model with all variables and constraints.
+
+        Returns:
+            Configured HiGHS model ready for optimisation
+        """
+        h = highspy.Highs()
+        h.silent()
+
+        # Add all variables
+        self._add_variables(h)
+
+        # Add constraints
+        self._add_operation_uniqueness_constraints(h)
+        self._add_edge_exclusivity_constraints(h)
+        self._add_flow_conservation_constraints(h)
+
+        # Set objective
+        self._set_objective(h)
+
+        return h
+
+    def _add_variables(self, h: highspy.Highs) -> None:
+        """Add all decision variables to the model.
+
+        Args:
+            h: HiGHS model instance
+        """
+        inf = highspy.kHighsInf
+
+        # Add y variables (binary: operation-edge assignment)
+        for _ in range(self.y_var_count):
+            h.addVar(0.0, 1.0)
+
+        # Add z variables (continuous non-negative: flow variables)
+        for _ in range(self.z_var_count):
+            h.addVar(0.0, inf)
+
+        # Set y variables as binary (integers with bounds [0,1])
+        for var_idx in range(self.y_var_count):
+            h.changeColIntegrality(var_idx, highspy.HighsVarType.kInteger)
+
+    def _add_operation_uniqueness_constraints(self, h: highspy.Highs) -> None:
+        """Add constraints: each operation assigned to exactly one edge.
+
+        Constraint: Σ_e y_{o,e} = 1 for each operation o
+
+        Args:
+            h: HiGHS model instance
+        """
+        for op_idx in range(self.operation_count):
+            indices = []
+            values = []
+            for edge_idx in range(self.edge_count):
+                var_idx = self._get_y_var_index(op_idx, edge_idx)
+                indices.append(var_idx)
+                values.append(1.0)
+
+            h.addRow(1.0, 1.0, len(indices), indices, values)
+
+    def _add_edge_exclusivity_constraints(self, h: highspy.Highs) -> None:
+        """Add constraints: each edge used at most once per layer.
+
+        For sequential operations (one per layer):
+        Constraint: y_{o,e} ≤ 1 for each operation o, edge e
+
+        This is automatically satisfied by binary variables, but we add it
+        explicitly in case of parallel operations in the same layer.
+
+        For now, we assume sequential operations, so this constraint is
+        implicitly satisfied by the operation uniqueness constraint.
+
+        Args:
+            h: HiGHS model instance
+        """
+        # With sequential operations, each operation is its own layer
+        # The binary constraint on y_{o,e} handles this automatically
+        pass
+
+    def _add_flow_conservation_constraints(self, h: highspy.Highs) -> None:
+        """Add flow conservation constraints linking y and z variables.
+
+        For each transition (qubit l, from_op o', to_op o):
+            - Outflow from o': Σ_e z^l_{o, e', e} = y_{o', e'} for each e'
+            - Inflow to o: Σ_{e'} z^l_{o, e', e} = y_{o, e} for each e
+
+        Args:
+            h: HiGHS model instance
+        """
+        for trans_idx, transition in enumerate(self.flow_transitions):
+            from_op = transition.from_operation_index
+            to_op = transition.to_operation_index
+
+            # Outflow constraints: Σ_e z^l_{o, e', e} = y_{o', e'} for each e'
+            for from_edge_idx in range(self.edge_count):
+                indices = []
+                values = []
+
+                # Add z variables (positive coefficient)
+                for to_edge_idx in range(self.edge_count):
+                    z_idx = self._get_z_var_index(trans_idx, from_edge_idx, to_edge_idx)
+                    indices.append(z_idx)
+                    values.append(1.0)
+
+                # Add y variable (negative coefficient for RHS)
+                y_idx = self._get_y_var_index(from_op, from_edge_idx)
+                indices.append(y_idx)
+                values.append(-1.0)
+
+                h.addRow(0.0, 0.0, len(indices), indices, values)
+
+            # Inflow constraints: Σ_{e'} z^l_{o, e', e} = y_{o, e} for each e
+            for to_edge_idx in range(self.edge_count):
+                indices = []
+                values = []
+
+                # Add z variables (positive coefficient)
+                for from_edge_idx in range(self.edge_count):
+                    z_idx = self._get_z_var_index(trans_idx, from_edge_idx, to_edge_idx)
+                    indices.append(z_idx)
+                    values.append(1.0)
+
+                # Add y variable (negative coefficient for RHS)
+                y_idx = self._get_y_var_index(to_op, to_edge_idx)
+                indices.append(y_idx)
+                values.append(-1.0)
+
+                h.addRow(0.0, 0.0, len(indices), indices, values)
+
+    def _set_objective(self, h: highspy.Highs) -> None:
+        """Set the objective function: minimise total distance.
+
+        Objective: Σ dist(pos_l(e'), pos_l(e)) · z^l_{o, e', e}
+
+        Args:
+            h: HiGHS model instance
+        """
+        # Set objective sense to minimise
+        h.changeObjectiveSense(highspy.ObjSense.kMinimize)
+
+        # Set coefficients for z variables based on distances
+        for trans_idx, transition in enumerate(self.flow_transitions):
+            qubit = transition.qubit
+            from_op = transition.from_operation_index
+            to_op = transition.to_operation_index
+
+            for from_edge_idx in range(self.edge_count):
+                from_edge = self.edges[from_edge_idx]
+                from_position = self._get_qubit_position_in_edge(
+                    qubit, from_op, from_edge
+                )
+
+                for to_edge_idx in range(self.edge_count):
+                    to_edge = self.edges[to_edge_idx]
+                    to_position = self._get_qubit_position_in_edge(
+                        qubit, to_op, to_edge
+                    )
+
+                    distance = self.distance_matrix[(from_position, to_position)]
+                    z_idx = self._get_z_var_index(trans_idx, from_edge_idx, to_edge_idx)
+
+                    h.changeColCost(z_idx, float(distance))
+
+    def _extract_solution(self, h: highspy.Highs) -> BipartiteAllocationResult:
+        """Extract the solution from the solved HiGHS model.
+
+        Args:
+            h: Solved HiGHS model instance
+
+        Returns:
+            BipartiteAllocationResult containing the solution
+        """
+        info = h.getInfo()
+        objective_value = info.objective_function_value
+
+        solution = h.getSolution()
+        col_values = solution.col_value
+
+        # Extract operation-edge assignments from y variables
+        operation_edge_assignment: dict[
+            int, tuple[quariadne.circuit.PhysicalQubit, quariadne.circuit.PhysicalQubit]
+        ] = {}
+
+        for op_idx in range(self.operation_count):
+            for edge_idx in range(self.edge_count):
+                y_idx = self._get_y_var_index(op_idx, edge_idx)
+                if col_values[y_idx] > 0.5:  # Binary variable is 1
+                    operation_edge_assignment[op_idx] = self.edges[edge_idx]
+                    break
+
+        # Derive initial mapping using bipartite matching for unique positions
+        initial_mapping = self._derive_initial_mapping(operation_edge_assignment)
+
+        # Derive swap sequence from solution (includes pre-first-op swaps)
+        swap_sequence = self._derive_swap_sequence(
+            operation_edge_assignment, col_values, initial_mapping
+        )
+
+        return BipartiteAllocationResult(
+            objective_value=objective_value,
+            operation_edge_assignment=operation_edge_assignment,
+            initial_mapping=initial_mapping,
+            swap_sequence=swap_sequence,
+        )
+
+    def _derive_initial_mapping(
+        self,
+        operation_edge_assignment: dict[
+            int, tuple[quariadne.circuit.PhysicalQubit, quariadne.circuit.PhysicalQubit]
+        ],
+    ) -> dict[quariadne.circuit.LogicalQubit, quariadne.circuit.PhysicalQubit]:
+        """Derive initial qubit mapping from operation-edge assignments.
+
+        Prioritises placing qubits at their first-operation positions. For qubits
+        with conflicting positions, uses the earliest operation's position first.
+        Remaining qubits (those not in any operation or with conflicts) are
+        assigned to unused physical positions.
+
+        Args:
+            operation_edge_assignment: Mapping from operation index to assigned edge
+
+        Returns:
+            Initial logical-to-physical qubit mapping
+        """
+        initial_mapping: dict[
+            quariadne.circuit.LogicalQubit, quariadne.circuit.PhysicalQubit
+        ] = {}
+        used_positions: set[quariadne.circuit.PhysicalQubit] = set()
+
+        # Collect (qubit, first_op_index, desired_position) tuples
+        qubit_first_ops: list[
+            tuple[quariadne.circuit.LogicalQubit, int, quariadne.circuit.PhysicalQubit]
+        ] = []
+
+        for qubit, op_info in self.qubit_operations.items():
+            if op_info.operation_indices:
+                first_op_idx = op_info.operation_indices[0]
+                if first_op_idx in operation_edge_assignment:
+                    edge = operation_edge_assignment[first_op_idx]
+                    position = self._get_qubit_position_in_edge(
+                        qubit, first_op_idx, edge
+                    )
+                    qubit_first_ops.append((qubit, first_op_idx, position))
+
+        # Sort by first operation index (earlier operations get priority)
+        qubit_first_ops.sort(key=lambda x: x[1])
+
+        # Assign qubits to their desired positions (first-come, first-served)
+        for qubit, first_op_idx, desired_pos in qubit_first_ops:
+            if desired_pos not in used_positions:
+                initial_mapping[qubit] = desired_pos
+                used_positions.add(desired_pos)
+
+        # For qubits with conflicts, find closest available position
+        for qubit, first_op_idx, desired_pos in qubit_first_ops:
+            if qubit not in initial_mapping:
+                # Find nearest available position
+                best_pos = None
+                best_dist = float("inf")
+                for pq in self.coupling_map.nodes:
+                    if pq not in used_positions:
+                        dist = self.distance_matrix.get((desired_pos, pq), float("inf"))
+                        if dist < best_dist:
+                            best_dist = dist
+                            best_pos = pq
+                if best_pos is not None:
+                    initial_mapping[qubit] = best_pos
+                    used_positions.add(best_pos)
+
+        # Assign remaining qubits (those not in any two-qubit operation)
+        for qubit in self.routed_circuit.qubits:
+            if qubit not in initial_mapping:
+                for pq in self.coupling_map.nodes:
+                    if pq not in used_positions:
+                        initial_mapping[qubit] = pq
+                        used_positions.add(pq)
+                        break
+
+        return initial_mapping
+
+    def _derive_swap_sequence(
+        self,
+        operation_edge_assignment: dict[
+            int, tuple[quariadne.circuit.PhysicalQubit, quariadne.circuit.PhysicalQubit]
+        ],
+        col_values: list[float],
+        initial_mapping: dict[
+            quariadne.circuit.LogicalQubit, quariadne.circuit.PhysicalQubit
+        ],
+    ) -> dict[int, list[quariadne.circuit.PhysicalSwap]]:
+        """Derive the swap sequence from the LP solution.
+
+        This method analyses the flow variables to determine what swaps are needed
+        between consecutive operations, including swaps before the first operation
+        to move qubits from initial positions to their required positions.
+
+        Args:
+            operation_edge_assignment: Mapping from operation index to assigned edge
+            col_values: Solution values from HiGHS
+            initial_mapping: Initial logical-to-physical mapping
+
+        Returns:
+            Dictionary mapping operation index to list of swaps needed before it
+        """
+        swap_sequence: dict[int, list[quariadne.circuit.PhysicalSwap]] = defaultdict(
+            list
+        )
+
+        # Add swaps before first operation for each qubit
+        # (to move from initial_mapping position to desired first-op position)
+        for qubit, op_info in self.qubit_operations.items():
+            if op_info.operation_indices:
+                first_op = op_info.operation_indices[0]
+                if first_op in operation_edge_assignment:
+                    edge = operation_edge_assignment[first_op]
+                    desired_pos = self._get_qubit_position_in_edge(
+                        qubit, first_op, edge
+                    )
+                    initial_pos = initial_mapping.get(qubit)
+
+                    if initial_pos is not None and initial_pos != desired_pos:
+                        # Need swaps to move from initial to desired position
+                        path = nx.shortest_path(
+                            self.coupling_map.to_undirected(), initial_pos, desired_pos
+                        )
+                        for i in range(len(path) - 1):
+                            swap = quariadne.circuit.PhysicalSwap(path[i], path[i + 1])
+                            if swap not in swap_sequence[first_op]:
+                                swap_sequence[first_op].append(swap)
+
+        # Process transitions between operations to find required swaps
+        for trans_idx, transition in enumerate(self.flow_transitions):
+            qubit = transition.qubit
+            from_op = transition.from_operation_index
+            to_op = transition.to_operation_index
+
+            if (
+                from_op in operation_edge_assignment
+                and to_op in operation_edge_assignment
+            ):
+                from_edge = operation_edge_assignment[from_op]
+                to_edge = operation_edge_assignment[to_op]
+
+                from_pos = self._get_qubit_position_in_edge(qubit, from_op, from_edge)
+                to_pos = self._get_qubit_position_in_edge(qubit, to_op, to_edge)
+
+                # If positions differ, we need swaps
+                if from_pos != to_pos:
+                    # Find the path and create swap operations
+                    path = nx.shortest_path(
+                        self.coupling_map.to_undirected(), from_pos, to_pos
+                    )
+                    for i in range(len(path) - 1):
+                        swap = quariadne.circuit.PhysicalSwap(path[i], path[i + 1])
+                        if swap not in swap_sequence[to_op]:
+                            swap_sequence[to_op].append(swap)
+
+        return dict(swap_sequence)
+
+    def run(self) -> BipartiteAllocationResult:
+        """Run the bipartite allocation LP optimisation.
+
+        Returns:
+            BipartiteAllocationResult containing the optimal solution
+        """
+        if self.operation_count == 0:
+            # No two-qubit operations, return trivial mapping
+            trivial_mapping = {
+                qubit: quariadne.circuit.PhysicalQubit(qubit.index)
+                for qubit in self.routed_circuit.qubits
+            }
+            return BipartiteAllocationResult(
+                objective_value=0.0,
+                operation_edge_assignment={},
+                initial_mapping=trivial_mapping,
+                swap_sequence={},
+            )
+
+        # Build and solve the model
+        h = self._build_model()
+        h.run()
+
+        # Check solution status
+        model_status = h.getModelStatus()
+        if model_status != highspy.HighsModelStatus.kOptimal:
+            raise RuntimeError(f"LP optimisation failed with status: {model_status}")
+
+        return self._extract_solution(h)

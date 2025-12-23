@@ -29,6 +29,12 @@ The codebase follows a layered architecture:
 - Generates constraint matrices for optimization (logical/physical uniqueness)
 - Uses scipy optimization for routing solutions
 
+### Bipartite Allocation Router (`quariadne/bipartite_allocation_lp.py`)
+- **BipartiteAllocationRouter**: LP-based router using bipartite matching formulation
+- Uses HiGHS solver (highspy) for efficient LP optimisation
+- Implements flow conservation between consecutive operations
+- Minimises total qubit movement distance
+
 ## Development Commands
 
 ### Environment Setup
@@ -63,8 +69,9 @@ The project uses Jupyter notebooks for experimentation (see `notebook/MILP.ipynb
 
 - **qiskit**: Quantum circuit framework and DAG operations
 - **networkx**: Graph algorithms and DAG manipulation
-- **scipy**: Optimization routines for MILP solving
-- **matplotlib**: Circuit and DAG visualization
+- **scipy**: Optimisation routines for MILP solving
+- **highspy**: HiGHS LP/MIP solver for bipartite allocation
+- **matplotlib**: Circuit and DAG visualisation
 - **numpy**: Mathematical operations and array handling
 
 ## Development Notes
@@ -98,6 +105,59 @@ The `MilpRouter` class implements Mixed-Integer Linear Programming for quantum c
 ### Variable Indexing
 - Variables are flattened: [mapping_vars, gate_execution_vars, movement_vars]
 - Padding offsets ensure correct indexing across variable types
+
+
+## Bipartite Allocation LP Implementation Notes
+
+The `BipartiteAllocationRouter` class implements Linear Programming for quantum circuit routing using the HiGHS solver (highspy). This formulation uses a bipartite matching approach.
+
+### Mathematical Formulation
+
+**Variables:**
+- `y_{o,e}` ∈ {0,1}: binary variable indicating operation `o` is assigned to directed edge `e`
+- `z^l_{o,e',e}` ≥ 0: flow variable linking edge `e'` at previous operation to edge `e` at current operation for qubit `l`
+
+**Constraints:**
+1. **Operation Uniqueness**: Σ_e y_{o,e} = 1 (each operation on exactly one edge)
+2. **Edge Exclusivity**: Σ_o y_{o,e} ≤ 1 per layer (each edge used at most once per layer)
+3. **Flow Conservation**: Links consecutive y variables through z flow variables
+   - Outflow: Σ_e z^l_{o,e',e} = y_{o',e'} for each source edge e'
+   - Inflow: Σ_{e'} z^l_{o,e',e} = y_{o,e} for each target edge e
+
+**Objective:**
+- Minimise Σ dist(pos_l(e'), pos_l(e)) · z^l_{o,e',e}
+- Where pos_l(e) is the physical position where qubit l sits when using edge e
+
+### Key Concepts
+
+**Qubit Position in Edge:**
+For a two-qubit operation on logical qubits (l1, l2) assigned to directed edge (p1, p2):
+- l1 (left qubit) sits at physical position p1
+- l2 (right qubit) sits at physical position p2
+
+**Flow Transitions:**
+- Track pairs of consecutive operations involving each qubit
+- FlowTransition dataclass captures (qubit, from_operation, to_operation) tuples
+- z variables only exist for valid transitions between operations involving the same qubit
+
+**Distance Calculation:**
+- Uses NetworkX shortest path on undirected coupling graph
+- Distance represents minimum number of SWAPs needed to move a qubit
+
+### HiGHS Integration
+
+The implementation uses the HiGHS Python interface (highspy):
+- `h.addVar(lb, ub)` for adding variables
+- `h.addRow(lb, ub, count, indices, values)` for sparse constraint addition
+- `h.changeColIntegrality()` for setting binary variables
+- `h.changeColCost()` for setting objective coefficients
+- `h.run()` for solving the model
+
+### Qiskit Plugin Registration
+
+Registered as transpiler plugins:
+- Layout: `quariadne_bipartite` via `QuariadneBipartiteLayoutPlugin`
+- Routing: `quariadne_bipartite` via `QuariadneBipartiteRoutingPlugin`
 
 ## Note for Claude Code 
 

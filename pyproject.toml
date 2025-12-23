@@ -5,6 +5,7 @@ description = "Exact solvers of the qubit routing problem"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
+    "highspy>=1.9.0",
     "matplotlib>=3.10.3",
     "mypy>=1.16.0",
     "networkx>=3.5",
@@ -17,9 +18,11 @@ dependencies = [
 
 [project.entry-points."qiskit.transpiler.layout"]
 "quariadne_milp" = "quariadne.qiskit_passes:QuariadneMilpLayoutPlugin"
+"quariadne_bipartite" = "quariadne.qiskit_passes:QuariadneBipartiteLayoutPlugin"
 
 [project.entry-points."qiskit.transpiler.routing"]
 "quariadne_milp" = "quariadne.qiskit_passes:QuariadneMilpRoutingPlugin"
+"quariadne_bipartite" = "quariadne.qiskit_passes:QuariadneBipartiteRoutingPlugin"
 
 [tool.uv]
 package = true
