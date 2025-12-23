@@ -10,7 +10,11 @@
 # for resuming after job restarts.
 #
 # Usage:
+#   # Local execution (ignores SLURM directives)
 #   ./eiger_benchmark.sh [--test]
+#
+#   # Cluster execution (requires logs/ directory to exist for SLURM output)
+#   mkdir -p logs && sbatch eiger_benchmark.sh [--test]
 #
 # Options:
 #   --test  Run in test mode: single circuit with sabre algorithm
