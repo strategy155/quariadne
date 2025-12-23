@@ -13,6 +13,7 @@ See: https://ergo-code.github.io/HiGHS/dev/interfaces/python/
 from __future__ import annotations
 
 import copy
+from collections import defaultdict
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING
@@ -65,9 +66,8 @@ class FlowTransition:
 class BipartiteAllocationResult:
     """Result container for bipartite allocation LP optimisation.
 
-    Contains the solution mapping operations to edges and the derived
-    initial qubit mapping. The swap sequence is computed by the routing pass
-    based on the actual DAG iteration order.
+    Contains the solution mapping operations to edges, the derived
+    initial qubit mapping, and the swap sequence extracted from z flow variables.
 
     Attributes:
         objective_value: The optimal objective value (total distance)
@@ -75,6 +75,7 @@ class BipartiteAllocationResult:
         operation_to_edge_by_qubits: Dict mapping (qubit1, qubit2, occurrence) to edge
         initial_mapping: Initial logical-to-physical qubit mapping
         operations: List of operations in LP order for reference
+        inserted_swaps: Dict mapping operation index to list of PhysicalSwap objects
     """
 
     objective_value: float
@@ -89,6 +90,7 @@ class BipartiteAllocationResult:
         quariadne.circuit.LogicalQubit, quariadne.circuit.PhysicalQubit
     ]
     operations: list[quariadne.circuit.QuantumOperation]
+    inserted_swaps: dict[int, list[quariadne.circuit.PhysicalSwap]]
 
 
 def get_coupling_graph(coupling_map: qiskit.transpiler.CouplingMap) -> nx.DiGraph:
@@ -572,6 +574,82 @@ class BipartiteAllocationRouter:
 
                     h.changeColCost(z_idx, float(distance))
 
+    def _extract_swaps_from_z_variables(
+        self,
+        col_values: list[float],
+        operation_edge_assignment: dict[
+            int, tuple[quariadne.circuit.PhysicalQubit, quariadne.circuit.PhysicalQubit]
+        ],
+    ) -> dict[int, list[quariadne.circuit.PhysicalSwap]]:
+        """Extract swap sequence from z flow variables.
+
+        Analyses z^l_{o,e',e} flow variables to determine qubit movements between
+        consecutive operations. When a qubit's position changes between operations,
+        computes the shortest path and generates corresponding SWAP operations.
+
+        Args:
+            col_values: Solution variable values from the LP solver
+            operation_edge_assignment: Mapping from operation index to assigned edge
+
+        Returns:
+            Dictionary mapping operation index to list of PhysicalSwap objects.
+            Swaps are keyed by the target operation index (swaps happen before that op).
+        """
+        inserted_swaps: dict[int, list[quariadne.circuit.PhysicalSwap]] = defaultdict(
+            list
+        )
+
+        # Get undirected coupling for shortest path computation
+        undirected_coupling = self.coupling_map.to_undirected()
+
+        for trans_idx, transition in enumerate(self.flow_transitions):
+            from_op = transition.from_operation_index
+            to_op = transition.to_operation_index
+            qubit = transition.qubit
+
+            # Find which (e', e) pair has z > 0 for this transition
+            for from_edge_idx in range(self.edge_count):
+                for to_edge_idx in range(self.edge_count):
+                    z_idx = self._get_z_var_index(trans_idx, from_edge_idx, to_edge_idx)
+                    z_value = col_values[z_idx]
+
+                    if z_value > 0.5:  # z variable is active
+                        from_edge = self.edges[from_edge_idx]
+                        to_edge = self.edges[to_edge_idx]
+
+                        # Determine qubit positions at each operation
+                        from_position = self._get_qubit_position_in_edge(
+                            qubit, from_op, from_edge
+                        )
+                        to_position = self._get_qubit_position_in_edge(
+                            qubit, to_op, to_edge
+                        )
+
+                        # If positions differ, compute swap path
+                        if from_position != to_position:
+                            # Compute shortest path between positions
+                            try:
+                                path = nx.shortest_path(
+                                    undirected_coupling,
+                                    from_position,
+                                    to_position,
+                                )
+                            except nx.NetworkXNoPath:
+                                continue
+
+                            # Generate swaps along the path (stop one before target)
+                            for i in range(len(path) - 1):
+                                p_from = path[i]
+                                p_to = path[i + 1]
+
+                                swap = quariadne.circuit.PhysicalSwap(p_from, p_to)
+
+                                # Check for duplicates
+                                if swap not in inserted_swaps[to_op]:
+                                    inserted_swaps[to_op].append(swap)
+
+        return dict(inserted_swaps)
+
     def _extract_solution(self, h: highspy.Highs) -> BipartiteAllocationResult:
         """Extract the solution from the solved HiGHS model.
 
@@ -622,12 +700,18 @@ class BipartiteAllocationRouter:
         # Derive initial mapping using bipartite matching for unique positions
         initial_mapping = self._derive_initial_mapping(operation_edge_assignment)
 
+        # Extract swaps from z flow variables
+        inserted_swaps = self._extract_swaps_from_z_variables(
+            col_values, operation_edge_assignment
+        )
+
         return BipartiteAllocationResult(
             objective_value=objective_value,
             operation_edge_assignment=operation_edge_assignment,
             operation_to_edge_by_qubits=operation_to_edge_by_qubits,
             initial_mapping=initial_mapping,
             operations=list(self.operations),
+            inserted_swaps=inserted_swaps,
         )
 
     def _derive_initial_mapping(
@@ -723,6 +807,7 @@ class BipartiteAllocationRouter:
                 operation_to_edge_by_qubits={},
                 initial_mapping=trivial_mapping,
                 operations=[],
+                inserted_swaps={},
             )
 
         # Build and solve the model

@@ -422,8 +422,7 @@ class BipartiteLayout(qiskit.transpiler.AnalysisPass):
 class BipartiteRouting(qiskit.transpiler.TransformationPass):
     """Routing pass using bipartite allocation LP for SWAP insertion.
 
-    This pass computes swap sequences on-the-fly based on the DAG iteration
-    order to handle potential reordering of operations during DAG construction.
+    Uses pre-computed swap sequences from the LP solution's z flow variables.
     """
 
     def __init__(self, coupling_map: qiskit.transpiler.CouplingMap) -> None:
@@ -493,13 +492,7 @@ class BipartiteRouting(qiskit.transpiler.TransformationPass):
         return updated_layout
 
     def run(self, dag: qiskit.dagcircuit.DAGCircuit) -> qiskit.dagcircuit.DAGCircuit:
-        """Apply bipartite LP-determined SWAP operations to the DAG.
-
-        Since the DAG may reorder operations topologically, and the LP's edge
-        assignments are based on original circuit order, we use a simpler
-        approach: for each two-qubit operation, check if it's on a valid edge.
-        If not, compute the minimal swaps to make it valid.
-        """
+        """Apply bipartite LP-determined SWAP operations to the DAG."""
         new_dag = dag.copy_empty_like()
 
         if self.coupling_map is None:
@@ -517,82 +510,48 @@ class BipartiteRouting(qiskit.transpiler.TransformationPass):
                 "Layout does not match DAG qubit count"
             )
 
-        canonical_register = dag.qregs["q"]
-        coupling_edges = set(self.coupling_map.get_edges())
+        # Retrieve LP result from property set (populated by BipartiteLayout)
+        if "bipartite_result" not in self.property_set:
+            raise qiskit.transpiler.TranspilerError(
+                "BipartiteRouting requires BipartiteLayout to be run first"
+            )
 
+        canonical_register = dag.qregs["q"]
+        bipartite_result = self.property_set["bipartite_result"]
+        swap_pairs_by_operation = bipartite_result.inserted_swaps
+
+        # Initialise layout tracking
         trivial_layout = qiskit.transpiler.Layout.generate_trivial_layout(
             canonical_register
         )
         current_layout = trivial_layout.copy()
 
-        import rustworkx as rx
-
-        undirected_coupling = self.coupling_map.graph.to_undirected()
-
+        two_qubit_idx = 0
+        # Process each layer and insert SWAPs as determined by LP
         for layer in dag.serial_layers():
             subdag = layer["graph"]
 
+            # Insert SWAPs before processing gates if required at this operation index
             for gate in subdag.two_qubit_ops():
-                # Get the DAG qubit indices for this gate
-                dag_q0 = dag.qubits.index(gate.qargs[0])
-                dag_q1 = dag.qubits.index(gate.qargs[1])
-
-                # Find current physical positions of these DAG qubits
-                phys_q0 = None
-                phys_q1 = None
-                for phys_idx in range(len(self.coupling_map.physical_qubits)):
-                    try:
-                        dag_qubit = current_layout[phys_idx]
-                        if dag_qubit._index == dag_q0:
-                            phys_q0 = phys_idx
-                        if dag_qubit._index == dag_q1:
-                            phys_q1 = phys_idx
-                    except KeyError:
-                        continue
-
-                if phys_q0 is None or phys_q1 is None:
-                    continue
-
-                # Check if current positions form a valid edge
-                if (phys_q0, phys_q1) in coupling_edges:
-                    continue  # Already valid, no swaps needed
-
-                # Need to move qubits to make them adjacent
-                # Find shortest path and swap along it
-                try:
-                    path = rx.dijkstra_shortest_paths(
-                        undirected_coupling, phys_q0, target=phys_q1
-                    )
-                    if phys_q1 not in path:
-                        continue
-                    path_nodes = list(path[phys_q1])
-                except Exception:
-                    continue
-
-                # Apply swaps to bring dag_q0 adjacent to dag_q1
-                # Swap along path from phys_q0 towards phys_q1 until adjacent
-                swaps = []
-                for i in range(len(path_nodes) - 2):  # Stop one before target
-                    p_from = path_nodes[i]
-                    p_to = path_nodes[i + 1]
-                    swap = quariadne.circuit.PhysicalSwap(
-                        quariadne.circuit.PhysicalQubit(p_from),
-                        quariadne.circuit.PhysicalQubit(p_to),
-                    )
-                    swaps.append(swap)
-
-                if swaps:
+                if two_qubit_idx in swap_pairs_by_operation:
+                    swaps = swap_pairs_by_operation[two_qubit_idx]
+                    # Create and insert SWAP operations
                     swap_dag = self._create_swap_dag(
                         canonical_register, current_layout, swaps
                     )
                     order = current_layout.reorder_bits(new_dag.qubits)
                     new_dag.compose(swap_dag, qubits=order)
 
+                    # Update layout state after SWAPs
                     current_layout = self._apply_swaps_to_layout(current_layout, swaps)
 
+                two_qubit_idx += 1
+
+            # Add the original layer operations
             order = current_layout.reorder_bits(new_dag.qubits)
             new_dag.compose(subdag, qubits=order)
 
+        # Update final layout state in property set
         if self.property_set["final_layout"] is None:
             self.property_set["final_layout"] = current_layout
         else:
