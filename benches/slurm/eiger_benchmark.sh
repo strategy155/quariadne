@@ -36,7 +36,7 @@
 
 # Load uenv environment (provides Python and build tools)
 # Note: --view does not work on Eiger's SLURM plugin
-#SBATCH --uenv=prgenv-gnu/24.11:v1
+#SBATCH --uenv=prgenv-gnu/25.11:v1
 
 # ============================================================================
 # Script Location (must be first, before any operations)
