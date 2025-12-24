@@ -108,22 +108,27 @@ echo ""
 echo "Setting up Quariadne repository..."
 echo "=========================================="
 
-# Check if script is inside a quariadne repo (look for pyproject.toml in grandparent)
+# Detect if script is running from within a quariadne repository
+# by checking for pyproject.toml in the script's grandparent directory
 if [[ -f "${SCRIPT_GRANDPARENT}/pyproject.toml" ]]; then
   echo "Using local quariadne repo: ${SCRIPT_GRANDPARENT}"
   PROJECT_ROOT="${SCRIPT_GRANDPARENT}"
 else
-  echo "Cloning quariadne from ${QUARIADNE_REPO}..."
+  # Clone repository to work directory if not present
   PROJECT_ROOT="${WORK_DIR}/quariadne"
 
   if [[ ! -d "${PROJECT_ROOT}" ]]; then
-    # Clone with submodules (QUEKO-benchmark)
+    echo "Cloning quariadne from ${QUARIADNE_REPO}..."
     git clone --recurse-submodules "${QUARIADNE_REPO}" "${PROJECT_ROOT}"
   fi
 
+  # Update to latest version of target branch
+  echo "Updating to latest ${QUARIADNE_BRANCH} branch..."
   git -C "${PROJECT_ROOT}" fetch origin
   git -C "${PROJECT_ROOT}" checkout "${QUARIADNE_BRANCH}"
   git -C "${PROJECT_ROOT}" pull origin "${QUARIADNE_BRANCH}"
+
+  # Ensure QUEKO-benchmark submodule is initialised
   git -C "${PROJECT_ROOT}" submodule update --init --recursive
 fi
 
