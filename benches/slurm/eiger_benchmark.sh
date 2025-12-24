@@ -115,7 +115,7 @@ fi
 
 echo "uv version: $(uv --version)"
 
-cd "${PROJECT_ROOT}"
+cd "${PROJECT_ROOT}" || { echo "ERROR: Failed to cd to ${PROJECT_ROOT}" >&2; exit 1; }
 
 # Check if virtual environment exists by looking for activate script
 venv_activate_script="${VENV_DIR}/bin/activate"
@@ -129,6 +129,7 @@ echo "Syncing dependencies with uv..."
 uv sync
 
 # Activate the virtual environment
+# shellcheck source=/dev/null
 source "${venv_activate_script}"
 
 echo "Python: $(which python)"
