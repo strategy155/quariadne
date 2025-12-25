@@ -27,6 +27,13 @@ if TYPE_CHECKING:
     import qiskit.transpiler
 
 
+# Module-level cache for distance matrices, keyed by frozenset of edges
+_distance_matrix_cache: dict[
+    frozenset[tuple[int, int]],
+    dict[tuple[quariadne.circuit.PhysicalQubit, quariadne.circuit.PhysicalQubit], float],
+] = {}
+
+
 class BipartiteVariableType(Enum):
     """Enum for variable types in the bipartite allocation LP."""
 
@@ -244,11 +251,20 @@ class BipartiteAllocationRouter:
         """Compute shortest path distances between all pairs of physical qubits.
 
         Uses NetworkX's shortest path algorithm on the undirected version of the
-        coupling graph to find distances.
+        coupling graph to find distances. Results are cached at module level since
+        hardware topology is stable across routing invocations.
 
         Returns:
             Dictionary mapping (source, target) qubit pairs to their shortest distance
         """
+        # Create cache key from edges (frozenset of (from_idx, to_idx) tuples)
+        cache_key = frozenset(
+            (edge[0].index, edge[1].index) for edge in self.coupling_map.edges()
+        )
+
+        if cache_key in _distance_matrix_cache:
+            return _distance_matrix_cache[cache_key]
+
         # Convert to undirected for distance calculation (SWAPs are bidirectional)
         undirected_coupling = self.coupling_map.to_undirected()
 
@@ -270,6 +286,7 @@ class BipartiteAllocationRouter:
                     # Disconnected graph case
                     distance_dict[(source_qubit, target_qubit)] = float("inf")
 
+        _distance_matrix_cache[cache_key] = distance_dict
         return distance_dict
 
     def _build_qubit_operation_map(
