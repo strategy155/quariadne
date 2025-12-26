@@ -39,6 +39,23 @@ substructure. When the y variables are fixed, the z subproblem becomes a
 transportation problem with integral extreme points. The HiGHS solver typically
 finds integral solutions even without explicit integrality constraints on z.
 
+Known Limitation
+----------------
+**BUG**: The current formulation lacks global position consistency constraints.
+Each operation is assigned to an edge independently, without enforcing that:
+
+1. Different logical qubits occupy different physical positions at any time
+2. Qubit positions are globally consistent across all operations
+
+This allows the LP to "reuse" physical positions for different logical qubits
+at different operations, leading to infeasible solutions. For example, if q2 is
+at position 4 in operation 1 and q4 is at position 4 in operation 3, the LP
+treats these as valid even though physically impossible.
+
+The fix requires adding position exclusivity constraints that track qubit
+positions across all operations, not just between consecutive operations
+involving the same qubit. This is a TODO for future work.
+
 Implementation Notes
 --------------------
 - Uses HiGHS solver (highspy) for efficient LP/MIP optimisation.
@@ -65,6 +82,7 @@ Example
 from __future__ import annotations
 
 import copy
+import functools
 from collections import defaultdict
 from dataclasses import dataclass, field
 from enum import Enum
@@ -79,19 +97,39 @@ if TYPE_CHECKING:
     import qiskit.transpiler
 
 
-# Module-level cache for distance matrices.
-#
-# Hardware topology is stable across routing invocations for the same backend,
-# so we cache the all-pairs shortest path distances to avoid O(V²) recomputation.
-# Cache key is a frozenset of edge tuples (from_idx, to_idx) which uniquely
-# identifies the coupling graph structure.
-#
-# See: https://docs.python.org/3.13/library/functools.html#functools.cache
-# for an alternative approach using functools.cache on class methods.
-_distance_matrix_cache: dict[
-    frozenset[tuple[int, int]],
-    dict[tuple[quariadne.circuit.PhysicalQubit, quariadne.circuit.PhysicalQubit], float],
-] = {}
+@functools.lru_cache(maxsize=8)
+def _compute_all_pairs_distances(
+    edges: frozenset[tuple[int, int]],
+) -> dict[tuple[int, int], int]:
+    """Compute shortest path distances for a coupling graph.
+
+    Uses LRU cache to avoid recomputation for the same hardware topology.
+    The cache key is a frozenset of edge tuples identifying the graph structure.
+
+    Args:
+        edges: Frozenset of (from_index, to_index) tuples defining the coupling graph.
+
+    Returns:
+        Dictionary mapping (source_index, target_index) to shortest path length.
+
+    See Also:
+        - https://docs.python.org/3.13/library/functools.html#functools.lru_cache
+        - https://networkx.org/documentation/stable/reference/algorithms/shortest_paths.html
+    """
+    # Reconstruct graph from edges
+    graph: nx.Graph[int] = nx.Graph()
+    for from_idx, to_idx in edges:
+        graph.add_edge(from_idx, to_idx)
+
+    # Compute all-pairs shortest paths
+    distances: dict[tuple[int, int], int] = {}
+    all_pairs = dict(nx.all_pairs_shortest_path_length(graph))
+
+    for source, targets in all_pairs.items():
+        for target, length in targets.items():
+            distances[(source, target)] = length
+
+    return distances
 
 
 class BipartiteVariableType(Enum):
@@ -310,43 +348,36 @@ class BipartiteAllocationRouter:
     ]:
         """Compute shortest path distances between all pairs of physical qubits.
 
-        Uses NetworkX's shortest path algorithm on the undirected version of the
-        coupling graph to find distances. Results are cached at module level since
-        hardware topology is stable across routing invocations.
+        Delegates to the cached `_compute_all_pairs_distances` function for the
+        actual computation, then wraps the result with PhysicalQubit keys.
 
         Returns:
-            Dictionary mapping (source, target) qubit pairs to their shortest distance
+            Dictionary mapping (source, target) PhysicalQubit pairs to distance.
         """
-        # Create cache key from edges (frozenset of (from_idx, to_idx) tuples)
-        cache_key = frozenset(
+        # Create hashable edge set for cache lookup
+        edges = frozenset(
             (edge[0].index, edge[1].index) for edge in self.coupling_map.edges()
         )
 
-        if cache_key in _distance_matrix_cache:
-            return _distance_matrix_cache[cache_key]
+        # Get cached integer-indexed distances
+        index_distances = _compute_all_pairs_distances(edges)
 
-        # Convert to undirected for distance calculation (SWAPs are bidirectional)
-        undirected_coupling = self.coupling_map.to_undirected()
-
+        # Build qubit-indexed distance matrix
         distance_dict: dict[
             tuple[quariadne.circuit.PhysicalQubit, quariadne.circuit.PhysicalQubit],
             float,
         ] = {}
 
-        # Compute all-pairs shortest paths
-        all_pairs_lengths = dict(nx.all_pairs_shortest_path_length(undirected_coupling))
-
         for source_qubit in self.coupling_map.nodes:
             for target_qubit in self.coupling_map.nodes:
-                if target_qubit in all_pairs_lengths[source_qubit]:
-                    distance_dict[(source_qubit, target_qubit)] = all_pairs_lengths[
-                        source_qubit
-                    ][target_qubit]
+                key = (source_qubit.index, target_qubit.index)
+                if key in index_distances:
+                    distance_dict[(source_qubit, target_qubit)] = float(
+                        index_distances[key]
+                    )
                 else:
-                    # Disconnected graph case
                     distance_dict[(source_qubit, target_qubit)] = float("inf")
 
-        _distance_matrix_cache[cache_key] = distance_dict
         return distance_dict
 
     def _build_qubit_operation_map(
