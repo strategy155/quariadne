@@ -41,20 +41,29 @@ finds integral solutions even without explicit integrality constraints on z.
 
 Known Limitation
 ----------------
-**BUG**: The current formulation lacks global position consistency constraints.
-Each operation is assigned to an edge independently, without enforcing that:
+**CRITICAL BUG**: The current formulation produces **semantically incorrect** circuits.
 
-1. Different logical qubits occupy different physical positions at any time
-2. Qubit positions are globally consistent across all operations
+The LP assigns operations to edges without global position consistency, allowing:
+1. Different logical qubits to be assigned to the same physical position
+2. The BipartiteRouting pass blindly places gates on LP-assigned edges
 
-This allows the LP to "reuse" physical positions for different logical qubits
-at different operations, leading to infeasible solutions. For example, if q2 is
-at position 4 in operation 1 and q4 is at position 4 in operation 3, the LP
-treats these as valid even though physically impossible.
+**Example of the bug:**
+For a circuit with CX(0,1), CX(0,2), CX(0,3), CX(0,4), CX(0,5):
+- LP assigns edges using only 4 physical positions for 6 logical qubits
+- Transpiled circuit: CX(7,10), CX(7,4), CX(7,6), CX(7,4), CX(7,10)
+- Gates CX(7,4) and CX(7,10) appear twice for different logical qubit pairs!
+- The circuit is syntactically valid (all edges exist) but semantically wrong
 
-The fix requires adding position exclusivity constraints that track qubit
-positions across all operations, not just between consecutive operations
-involving the same qubit. This is a TODO for future work.
+**Why tests passed:**
+- Session verification only checks that gates are on valid coupling edges
+- Simulators execute the gates without validating semantic correctness
+- QUEKO benchmarks are designed for optimal routing, masking the bug
+
+**Severity:** HIGH - The router produces circuits that compute the wrong result.
+
+**Fix required:** Add position exclusivity constraints to track qubit positions
+globally across all operations, ensuring each logical qubit has a unique
+physical position at any time.
 
 Implementation Notes
 --------------------
