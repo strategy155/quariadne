@@ -1,13 +1,65 @@
 """Bipartite Allocation LP Router for quantum circuit routing.
 
 This module implements a Linear Programming formulation for the token allocation
-problem in quantum circuit routing using bipartite matching concepts.
+problem in quantum circuit routing using bipartite matching concepts. The approach
+treats qubit routing as a network flow problem where operations are assigned to
+hardware edges and qubit movements are tracked through flow conservation.
 
-The formulation uses:
-- y_{o,e} variables: binary assignment of operation o to directed edge e
-- z^l_{o,e',e} variables: flow linking previous edge e' to current edge e for qubit l
+Mathematical Formulation
+------------------------
+The LP relaxation (with binary y variables) solves the following problem:
 
-See: https://ergo-code.github.io/HiGHS/dev/interfaces/python/
+**Decision Variables:**
+    - ``y_{o,e} ∈ {0,1}``: Binary variable indicating operation o is assigned to
+      directed edge e = (p1, p2) on the coupling graph.
+    - ``z^l_{o,e',e} ≥ 0``: Continuous flow variable linking edge e' at operation o'
+      to edge e at operation o for logical qubit l. Represents qubit movement.
+
+**Constraints:**
+    1. Operation Uniqueness: ``Σ_e y_{o,e} = 1`` for each operation o.
+       Each operation must be assigned to exactly one edge.
+
+    2. Flow Conservation (Outflow): ``Σ_e z^l_{o,e',e} = y_{o',e'}`` for each e'.
+       Total flow leaving edge e' must equal the assignment to that edge.
+
+    3. Flow Conservation (Inflow): ``Σ_{e'} z^l_{o,e',e} = y_{o,e}`` for each e.
+       Total flow entering edge e must equal the assignment to that edge.
+
+**Objective Function:**
+    Minimise ``Σ dist(pos_l(e'), pos_l(e)) · z^l_{o,e',e}``
+
+    where ``pos_l(e)`` is the physical position where logical qubit l resides
+    when assigned to edge e. The distance function returns the shortest path
+    length on the undirected coupling graph (number of SWAPs needed).
+
+LP Relaxation Properties
+------------------------
+The constraint matrix exhibits total unimodularity for the flow conservation
+substructure. When the y variables are fixed, the z subproblem becomes a
+transportation problem with integral extreme points. The HiGHS solver typically
+finds integral solutions even without explicit integrality constraints on z.
+
+Implementation Notes
+--------------------
+- Uses HiGHS solver (highspy) for efficient LP/MIP optimisation.
+- Distance matrix is cached at module level since hardware topology is stable.
+- The BipartiteRouting pass in qiskit_passes.py uses ``operation_to_edge_by_qubits``
+  to look up edge assignments, avoiding ordering mismatches between LP and DAG.
+- QUEKO benchmarks (designed for optimal routing) typically yield zero objective
+  value, confirming the LP finds swap-free assignments when they exist.
+
+References
+----------
+- HiGHS Python Interface: https://ergo-code.github.io/HiGHS/dev/interfaces/python/
+- Qiskit Transpiler: https://docs.quantum.ibm.com/api/qiskit/transpiler
+
+Example
+-------
+>>> from quariadne.bipartite_allocation_lp import BipartiteAllocationRouter
+>>> router = BipartiteAllocationRouter(coupling_graph, quantum_circuit)
+>>> result = router.run()
+>>> print(f"Objective: {result.objective_value}")
+>>> print(f"Initial mapping: {result.initial_mapping}")
 """
 
 from __future__ import annotations
@@ -27,7 +79,15 @@ if TYPE_CHECKING:
     import qiskit.transpiler
 
 
-# Module-level cache for distance matrices, keyed by frozenset of edges
+# Module-level cache for distance matrices.
+#
+# Hardware topology is stable across routing invocations for the same backend,
+# so we cache the all-pairs shortest path distances to avoid O(V²) recomputation.
+# Cache key is a frozenset of edge tuples (from_idx, to_idx) which uniquely
+# identifies the coupling graph structure.
+#
+# See: https://docs.python.org/3.13/library/functools.html#functools.cache
+# for an alternative approach using functools.cache on class methods.
 _distance_matrix_cache: dict[
     frozenset[tuple[int, int]],
     dict[tuple[quariadne.circuit.PhysicalQubit, quariadne.circuit.PhysicalQubit], float],
