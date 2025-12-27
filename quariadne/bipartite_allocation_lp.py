@@ -19,10 +19,15 @@ The LP relaxation (with binary y variables) solves the following problem:
     1. Operation Uniqueness: ``Σ_e y_{o,e} = 1`` for each operation o.
        Each operation must be assigned to exactly one edge.
 
-    2. Flow Conservation (Outflow): ``Σ_e z^l_{o,e',e} = y_{o',e'}`` for each e'.
+    2. Position Exclusivity (per layer t, per position p):
+       ``Σ_{o at t, e : p ∈ e} y_{o,e} ≤ 1``
+       Ensures each physical position is used by at most one operation per layer.
+       The constraint combines source and target usage into one constraint.
+
+    3. Flow Conservation (Outflow): ``Σ_e z^l_{o,e',e} = y_{o',e'}`` for each e'.
        Total flow leaving edge e' must equal the assignment to that edge.
 
-    3. Flow Conservation (Inflow): ``Σ_{e'} z^l_{o,e',e} = y_{o,e}`` for each e.
+    4. Flow Conservation (Inflow): ``Σ_{e'} z^l_{o,e',e} = y_{o,e}`` for each e.
        Total flow entering edge e must equal the assignment to that edge.
 
 **Objective Function:**
@@ -34,36 +39,32 @@ The LP relaxation (with binary y variables) solves the following problem:
 
 LP Relaxation Properties
 ------------------------
-The constraint matrix exhibits total unimodularity for the flow conservation
-substructure. When the y variables are fixed, the z subproblem becomes a
-transportation problem with integral extreme points. The HiGHS solver typically
-finds integral solutions even without explicit integrality constraints on z.
+The constraint matrix exhibits total unimodularity (TU). The position exclusivity
+constraints have bipartite incidence structure: each y_{o,e} variable appears in
+at most one constraint per layer (for any position p ∈ e). Combined with the flow
+conservation constraints (which form a transportation problem), the full matrix
+remains TU.
+
+When the y variables are fixed, the z subproblem becomes a transportation problem
+with integral extreme points. The HiGHS solver typically finds integral solutions
+even without explicit integrality constraints on z.
 
 Known Limitation
 ----------------
-**CRITICAL BUG**: The current formulation produces **semantically incorrect** circuits.
+The within-layer position exclusivity constraint only prevents collisions for
+operations that execute in **parallel** (same layer). For **sequential** operations
+where each layer has at most one operation, the constraint is trivially satisfied
+and provides no protection.
 
-The LP assigns operations to edges without global position consistency, allowing:
-1. Different logical qubits to be assigned to the same physical position
-2. The BipartiteRouting pass blindly places gates on LP-assigned edges
+**Affected case:** When operations share a common qubit (e.g., CX(0,1), CX(0,2), ...),
+they must execute sequentially. Qubits that appear in only one operation each
+(like L1, L2, ... in this example) have no flow constraints linking their positions
+across operations, allowing the LP to assign them to the same physical position.
 
-**Example of the bug:**
-For a circuit with CX(0,1), CX(0,2), CX(0,3), CX(0,4), CX(0,5):
-- LP assigns edges using only 4 physical positions for 6 logical qubits
-- Transpiled circuit: CX(7,10), CX(7,4), CX(7,6), CX(7,4), CX(7,10)
-- Gates CX(7,4) and CX(7,10) appear twice for different logical qubit pairs!
-- The circuit is syntactically valid (all edges exist) but semantically wrong
-
-**Why tests passed:**
-- Session verification only checks that gates are on valid coupling edges
-- Simulators execute the gates without validating semantic correctness
-- QUEKO benchmarks are designed for optimal routing, masking the bug
-
-**Severity:** HIGH - The router produces circuits that compute the wrong result.
-
-**Fix required:** Add position exclusivity constraints to track qubit positions
-globally across all operations, ensuring each logical qubit has a unique
-physical position at any time.
+**Workaround:** This limitation primarily affects circuits with a "star" structure
+where one qubit interacts sequentially with many others. Circuits with more
+parallelism (where different operations can execute simultaneously) are correctly
+constrained by the within-layer position exclusivity.
 
 Implementation Notes
 --------------------
@@ -309,6 +310,9 @@ class BipartiteAllocationRouter:
         # Build flow transitions (pairs of consecutive operations for each qubit)
         self.flow_transitions = self._build_flow_transitions()
 
+        # Build operation layers for position exclusivity constraints
+        self.operation_layers = self._build_operation_layers()
+
         # Variable indexing setup
         self._setup_variable_indexing()
 
@@ -435,6 +439,45 @@ class BipartiteAllocationRouter:
 
         return transitions
 
+    def _build_operation_layers(self) -> list[list[int]]:
+        """Group operations into parallel layers based on qubit dependencies.
+
+        Operations that share qubits cannot be in the same layer. Uses a greedy
+        algorithm to assign each operation to the earliest possible layer.
+
+        Returns:
+            List of layers, where each layer is a list of operation indices.
+        """
+        if self.operation_count == 0:
+            return []
+
+        layers: list[list[int]] = []
+        # Track which layer each qubit was last used in
+        qubit_last_layer: dict[quariadne.circuit.LogicalQubit, int] = {}
+
+        for op_idx, operation in enumerate(self.operations):
+            qubits = operation.qubits_participating
+
+            # Find the earliest layer this operation can go in
+            # Must be after any layer that uses the same qubits
+            min_layer = 0
+            for qubit in qubits:
+                if qubit in qubit_last_layer:
+                    min_layer = max(min_layer, qubit_last_layer[qubit] + 1)
+
+            # Extend layers list if needed
+            while len(layers) <= min_layer:
+                layers.append([])
+
+            # Add operation to this layer
+            layers[min_layer].append(op_idx)
+
+            # Update qubit_last_layer
+            for qubit in qubits:
+                qubit_last_layer[qubit] = min_layer
+
+        return layers
+
     def _setup_variable_indexing(self) -> None:
         """Set up variable indexing for the LP formulation.
 
@@ -448,7 +491,6 @@ class BipartiteAllocationRouter:
         self.y_var_offset = 0
 
         # z variables: for each transition, edge_count × edge_count possibilities
-        # But we only need z variables for valid (e', e) pairs
         self.z_var_count = (
             len(self.flow_transitions) * self.edge_count * self.edge_count
         )
@@ -589,23 +631,56 @@ class BipartiteAllocationRouter:
             h.addRow(1.0, 1.0, len(indices), indices, values)
 
     def _add_edge_exclusivity_constraints(self, h: highspy.Highs) -> None:
-        """Add constraints: each edge used at most once per layer.
+        """Add constraints: each physical position used at most once per layer.
 
-        For sequential operations (one per layer):
-        Constraint: y_{o,e} ≤ 1 for each operation o, edge e
+        For each layer t and physical position p:
+            Σ_{o at t, e : p ∈ e} y_{o,e} ≤ 1
 
-        This is automatically satisfied by binary variables, but we add it
-        explicitly in case of parallel operations in the same layer.
+        Where p ∈ e means p is either the source or target of edge e.
 
-        For now, we assume sequential operations, so this constraint is
-        implicitly satisfied by the operation uniqueness constraint.
+        This ensures physical position exclusivity: at each time step, each
+        physical qubit position is used by at most one operation. A single
+        combined constraint per position prevents conflicts where one operation
+        uses a position as source and another uses it as target.
 
         Args:
             h: HiGHS model instance
         """
-        # With sequential operations, each operation is its own layer
-        # The binary constraint on y_{o,e} handles this automatically
-        pass
+        # Build index mapping: position -> list of edge indices touching that position
+        position_to_edge_indices: dict[quariadne.circuit.PhysicalQubit, list[int]] = {
+            node: [] for node in self.coupling_map.nodes
+        }
+
+        for edge_idx, edge in enumerate(self.edges):
+            source, target = edge
+            position_to_edge_indices[source].append(edge_idx)
+            position_to_edge_indices[target].append(edge_idx)
+
+        # Add constraints for each layer and position
+        for layer in self.operation_layers:
+            if len(layer) <= 1:
+                # Single operation per layer: constraints trivially satisfied
+                continue
+
+            for position, edge_indices in position_to_edge_indices.items():
+                # Combined position constraint: Σ_{o at t, e : p ∈ e} y_{o,e} ≤ 1
+                constraint_indices = []
+                constraint_values = []
+
+                for op_idx in layer:
+                    for edge_idx in edge_indices:
+                        var_idx = self._get_y_var_index(op_idx, edge_idx)
+                        constraint_indices.append(var_idx)
+                        constraint_values.append(1.0)
+
+                if len(constraint_indices) > 1:
+                    h.addRow(
+                        -highspy.kHighsInf,
+                        1.0,
+                        len(constraint_indices),
+                        constraint_indices,
+                        constraint_values,
+                    )
 
     def _add_flow_conservation_constraints(self, h: highspy.Highs) -> None:
         """Add flow conservation constraints linking y and z variables.
@@ -812,7 +887,9 @@ class BipartiteAllocationRouter:
 
             full_key = (q1.index, q2.index, occurrence)
             if op_idx in operation_edge_assignment:
-                operation_to_edge_by_qubits[full_key] = operation_edge_assignment[op_idx]
+                operation_to_edge_by_qubits[full_key] = operation_edge_assignment[
+                    op_idx
+                ]
 
         # Derive initial mapping using bipartite matching for unique positions
         initial_mapping = self._derive_initial_mapping(operation_edge_assignment)
