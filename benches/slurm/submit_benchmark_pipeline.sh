@@ -43,8 +43,9 @@ SKIP_SETUP=false
 
 # Test mode overrides: smaller array range for quick validation
 # Full mode uses the array range defined in slurm_array.sh (0-27179)
-readonly TEST_ARRAY_RANGE="0-5"
-readonly TEST_ARRAY_TIME="00:15:00"
+# Test mode: single chunk (chunk 0 processes up to 30 tasks)
+readonly TEST_ARRAY_RANGE="0-0"
+readonly TEST_ARRAY_TIME="00:30:00"
 
 # ============================================================================
 # Parse Arguments
@@ -93,7 +94,7 @@ echo ""
 
 if [[ "${TEST_MODE}" == true ]]; then
   echo "Test configuration:"
-  echo "  Array range: ${TEST_ARRAY_RANGE} (6 tasks)"
+  echo "  Array range: ${TEST_ARRAY_RANGE} (1 chunk)"
   echo "  Array time:  ${TEST_ARRAY_TIME}"
   echo ""
 fi
