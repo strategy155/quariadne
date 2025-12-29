@@ -49,23 +49,6 @@ When the y variables are fixed, the z subproblem becomes a transportation proble
 with integral extreme points. The HiGHS solver typically finds integral solutions
 even without explicit integrality constraints on z.
 
-Known Limitation
-----------------
-The within-layer position exclusivity constraint only prevents collisions for
-operations that execute in **parallel** (same layer). For **sequential** operations
-where each layer has at most one operation, the constraint is trivially satisfied
-and provides no protection.
-
-**Affected case:** When operations share a common qubit (e.g., CX(0,1), CX(0,2), ...),
-they must execute sequentially. Qubits that appear in only one operation each
-(like L1, L2, ... in this example) have no flow constraints linking their positions
-across operations, allowing the LP to assign them to the same physical position.
-
-**Workaround:** This limitation primarily affects circuits with a "star" structure
-where one qubit interacts sequentially with many others. Circuits with more
-parallelism (where different operations can execute simultaneously) are correctly
-constrained by the within-layer position exclusivity.
-
 Implementation Notes
 --------------------
 - Uses HiGHS solver (highspy) for efficient LP/MIP optimisation.
