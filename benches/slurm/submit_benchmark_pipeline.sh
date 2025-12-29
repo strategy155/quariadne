@@ -157,14 +157,14 @@ setup_id=""
 # Phase 1: Setup (unless skipped)
 if [[ "${SKIP_SETUP}" == false ]]; then
   echo "Submitting Phase 1 (Setup)..."
-  setup_id=$(sbatch --parsable "${SETUP_SCRIPT}" "${SETUP_OPTS[@]:-}")
+  setup_id=$(sbatch --parsable "${SETUP_SCRIPT}" "${SETUP_OPTS[@]}")
   echo "  Job ID: ${setup_id}"
   echo ""
 
   # Phase 2: Array Job (depends on setup success)
   echo "Submitting Phase 2 (Array Job)..."
   echo "  Dependency: afterok:${setup_id}"
-  array_id=$(sbatch --parsable --dependency="afterok:${setup_id}" "${ARRAY_OPTS[@]:-}" "${ARRAY_SCRIPT}")
+  array_id=$(sbatch --parsable --dependency="afterok:${setup_id}" "${ARRAY_OPTS[@]}" "${ARRAY_SCRIPT}")
   echo "  Job ID: ${array_id}"
 else
   echo "Skipping Phase 1 (--skip-setup)"
@@ -172,7 +172,7 @@ else
 
   # Phase 2: Array Job (no dependency)
   echo "Submitting Phase 2 (Array Job)..."
-  array_id=$(sbatch --parsable "${ARRAY_OPTS[@]:-}" "${ARRAY_SCRIPT}")
+  array_id=$(sbatch --parsable "${ARRAY_OPTS[@]}" "${ARRAY_SCRIPT}")
   echo "  Job ID: ${array_id}"
 fi
 echo ""
