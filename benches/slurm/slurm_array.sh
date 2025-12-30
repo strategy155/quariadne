@@ -22,7 +22,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=1
-#SBATCH --array=0-905%64
+#SBATCH --array=0-905%128
 #SBATCH --output=array_%A_%a.out
 #SBATCH --error=array_%A_%a.err
 #SBATCH --uenv=prgenv-gnu/25.11:v1
@@ -60,6 +60,12 @@ chunk_end=$((chunk_start + CHUNK_SIZE - 1))
 
 # Get total number of tasks in task list
 total_tasks=$(wc -l < "${TASK_LIST}")
+
+# Sanity check: warn if task list seems too small for full mode
+if [[ ${total_tasks} -lt 100 ]] && [[ ${ARRAY_TASK_ID} -eq 0 ]]; then
+  echo "WARNING: Task list has only ${total_tasks} tasks."
+  echo "If running full mode, delete ${TASK_LIST} and rerun setup."
+fi
 
 # Clamp chunk_end to total_tasks - 1 (task indices are 0-based)
 if [[ ${chunk_end} -ge ${total_tasks} ]]; then
