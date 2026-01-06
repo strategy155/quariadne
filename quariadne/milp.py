@@ -127,10 +127,11 @@ class HiGHSSolverOptions:
     Attributes:
         time_limit: Maximum solver runtime in seconds. If the solver exceeds
                    this limit, it returns the best solution found so far.
+
+    Ref: https://ergo-code.github.io/HiGHS/dev/options/definitions/
     """
 
     time_limit: float
-    write_model_to_file: bool
 
 
 def get_coupling_graph(coupling_map: qiskit.transpiler.CouplingMap) -> nx.DiGraph:
@@ -1545,9 +1546,7 @@ class MilpScipyRouter:
         )
 
         # Configure solver options
-        solver_options = HiGHSSolverOptions(
-            time_limit=MILP_SOLVER_TIMEOUT_SECONDS, write_model_to_file=True
-        )
+        solver_options = HiGHSSolverOptions(time_limit=MILP_SOLVER_TIMEOUT_SECONDS)
         solver_options_dict = asdict(solver_options)
 
         # Solve the MILP problem
@@ -1581,7 +1580,11 @@ class MilpScipyRouter:
         milp_result: scipy.optimize.OptimizeResult,
         variable_type: RoutingVariableType,
     ) -> np.ndarray:
-        """Generic function to reconstruct variables from MILP solution using registry.
+        """Reconstruct variables from MILP solution using vectorised numpy operations.
+
+        Extracts a contiguous slice from the flat solution vector and reshapes it
+        to the appropriate multidimensional array. Uses copy=False to ensure O(1)
+        view creation rather than O(n) data copying.
 
         Args:
             milp_result: The scipy MILP optimization result containing the solution vector.
@@ -1589,21 +1592,23 @@ class MilpScipyRouter:
 
         Returns:
             Array with the specified shape containing reconstructed variables.
+
+        Raises:
+            ValueError: If reshape cannot create a view (requires data copy).
+
+        Ref: https://numpy.org/doc/stable/reference/generated/numpy.reshape.html
         """
         variable_info = self.variable_types[variable_type]
         variable_shape = variable_info[VARIABLE_SHAPE]
         flat_shape = variable_info[VARIABLE_FLAT_SHAPE]
         start_offset = variable_info[VARIABLE_OFFSET]
 
-        # Initialize variables array
-        variables = np.zeros(variable_shape)
-
-        # Extract variables from solution vector
-        for variable_index in range(flat_shape):
-            # Convert flat index to multidimensional position
-            variable_position = np.unravel_index(variable_index, variable_shape)
-            # Get value from solution vector at correct offset
-            variables[variable_position] = milp_result.x[start_offset + variable_index]
+        # Extract slice and reshape in single vectorised operation
+        # copy=False ensures O(1) view creation, raises ValueError if copy needed
+        end_offset = start_offset + flat_shape
+        variables = milp_result.x[start_offset:end_offset].reshape(
+            variable_shape, copy=False
+        )
 
         return variables
 

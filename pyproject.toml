@@ -58,3 +58,31 @@ dev = [
     "scipy-stubs>=1.16.1.0",
     "types-networkx>=3.5.0.20250531",
 ]
+# Test dependencies separated per PEP 735 dependency groups
+# Ref: https://peps.python.org/pep-0735/
+test = [
+    "pytest>=9.0.0",  # Modern pytest with native TOML support
+]
+
+# pytest configuration using native TOML syntax (pytest 9.0+)
+# Ref: https://docs.pytest.org/en/stable/reference/customize.html
+[tool.pytest]
+# Minimum pytest version required for [tool.pytest] native TOML syntax
+minversion = "9.0"
+# Test discovery paths
+testpaths = ["tests"]
+# Default command-line options:
+# --import-mode=importlib: Recommended for new projects, avoids sys.path manipulation
+#   Ref: https://docs.pytest.org/en/stable/explanation/goodpractices.html
+# -ra: Show extra test summary info for all except passed tests
+# -q: Quiet output mode
+addopts = [
+    "--import-mode=importlib",
+    "-ra",
+    "-q",
+]
+# Custom markers for test categorisation
+# Ref: https://docs.pytest.org/en/stable/how-to/mark.html
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+]

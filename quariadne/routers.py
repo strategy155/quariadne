@@ -654,6 +654,12 @@ class LpRouterEdges(Router):
             None
         )
 
+        # Pre-compute edge-to-index lookup dictionary for O(1) lookups
+        # Replaces O(n) list.index() calls in bipartite matching translation
+        self._edge_to_index: dict[
+            tuple[quariadne.circuit.PhysicalQubit, quariadne.circuit.PhysicalQubit], int
+        ] = {edge: idx for idx, edge in enumerate(self.coupling_map.edges())}
+
         # Run routing automatically
         self._run()
 
@@ -757,7 +763,6 @@ class LpRouterEdges(Router):
             List of edge indices into self.coupling_map.edges() for matched actual edges
         """
         coupling_map_nodes = list(self.coupling_map.nodes)
-        coupling_map_edges = list(self.coupling_map.edges())
         matched_edge_indices = []
 
         for row_idx, col_idx in zip(row_indices, col_indices):
@@ -767,7 +772,8 @@ class LpRouterEdges(Router):
             # Skip forcing edges (self-loops indicate qubit not used in gate)
             if source_qubit != target_qubit:
                 edge = (source_qubit, target_qubit)
-                edge_index = coupling_map_edges.index(edge)
+                # O(1) dictionary lookup instead of O(n) list.index()
+                edge_index = self._edge_to_index[edge]
                 matched_edge_indices.append(edge_index)
 
         return matched_edge_indices
@@ -850,8 +856,8 @@ class LpRouterEdges(Router):
         for source_qubit, target_qubit, weight in sorted_edges:
             # Only keep edge if neither vertex has been used
             if source_qubit not in used_vertices and target_qubit not in used_vertices:
-                # Find the edge index in the original coupling_map.edges()
-                edge_idx = coupling_map_edges.index((source_qubit, target_qubit))
+                # O(1) dictionary lookup instead of O(n) list.index()
+                edge_idx = self._edge_to_index[(source_qubit, target_qubit)]
                 pruned_edge_indices.append(edge_idx)
                 used_vertices.add(source_qubit)
                 used_vertices.add(target_qubit)
