@@ -95,7 +95,7 @@ class LayoutMethod(StrEnum):
 
 
 class RoutingMethod(StrEnum):
-    """Routing methods for benchmarking (6 algorithms total).
+    """Routing methods for benchmarking (7 algorithms total).
 
     Quariadne methods match entry points registered in pyproject.toml.
     Qiskit methods use built-in routing algorithms.
@@ -104,6 +104,7 @@ class RoutingMethod(StrEnum):
         QUARIADNE_ILP: Integer Linear Programming (exact solver)
         QUARIADNE_LPM: LP with Birkhoff decomposition (mapping recovery)
         QUARIADNE_LPE: LP with edge-based bipartite matching
+        QUARIADNE_BIPARTITE: LP-based bipartite allocation router (HiGHS solver)
         SABRE: Qiskit SABRE routing algorithm
         BASIC: Qiskit basic routing algorithm
         LOOKAHEAD: Qiskit lookahead routing algorithm
@@ -113,6 +114,7 @@ class RoutingMethod(StrEnum):
     QUARIADNE_ILP = "quariadne_ilp"
     QUARIADNE_LPM = "quariadne_lpm"
     QUARIADNE_LPE = "quariadne_lpe"
+    QUARIADNE_BIPARTITE = "quariadne_bipartite"
 
     # Qiskit baseline methods
     SABRE = "sabre"
@@ -130,6 +132,7 @@ class RoutingMethod(StrEnum):
             RoutingMethod.QUARIADNE_ILP,
             RoutingMethod.QUARIADNE_LPM,
             RoutingMethod.QUARIADNE_LPE,
+            RoutingMethod.QUARIADNE_BIPARTITE,
         ):
             layout = self.value
         elif self == RoutingMethod.SABRE:

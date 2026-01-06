@@ -15,12 +15,15 @@ dependencies = [
     "qiskit>=2.0.1",
     "qiskit-ibm-runtime>=0.40.1",
     "ruff>=0.11.12",
+    "scipy",
+    "highspy>=1.9.0",
 ]
 
 [project.entry-points.'qiskit.transpiler.layout']
 "quariadne_ilp" = "quariadne.qiskit_passes:QuariadneIlpLayoutPlugin"
 "quariadne_lpm" = "quariadne.qiskit_passes:QuariadneLpLayoutPlugin"
 "quariadne_lpe" = "quariadne.qiskit_passes:QuariadneEdgeLayoutPlugin"
+"quariadne_bipartite" = "quariadne.qiskit_passes:QuariadneBipartiteLayoutPlugin"
 
 
 
@@ -28,6 +31,7 @@ dependencies = [
 "quariadne_ilp" = "quariadne.qiskit_passes:QuariadneIlpRoutingPlugin"
 "quariadne_lpm" = "quariadne.qiskit_passes:QuariadneLpRoutingPlugin"
 "quariadne_lpe" = "quariadne.qiskit_passes:QuariadneEdgeRoutingPlugin"
+"quariadne_bipartite" = "quariadne.qiskit_passes:QuariadneBipartiteRoutingPlugin"
 
 
 
@@ -35,7 +39,8 @@ dependencies = [
 package = true
 
 [tool.uv.sources]
-birkhoff = { git = "https://github.com/strategy155/birkhoff.git" }
+birkhoff = { git = "ssh://git@github.com/strategy155/birkhoff.git" }
+scipy = { git = "ssh://git@github.com/strategy155/scipy.git" }
 
 [build-system]
 requires = ["hatchling"]
