@@ -76,14 +76,21 @@ from __future__ import annotations
 
 import copy
 import functools
+import logging
+import time
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Generator
+from typing import TYPE_CHECKING
 
 import highspy
 import networkx as nx
+import numpy as np
 
+import quariadne.benchmarks.constants
 import quariadne.circuit
+import quariadne.device_cache
+
+_logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     import qiskit.transpiler
@@ -95,25 +102,24 @@ def _compute_all_pairs_distances(
 ) -> dict[tuple[int, int], int]:
     """Compute shortest path distances for a coupling graph.
 
-    Uses LRU cache to avoid recomputation for the same hardware topology.
-    The cache key is a frozenset of edge tuples identifying the graph structure.
+    Checks device cache first for known backends, falls back to computation.
 
     Args:
         edges: Frozenset of (from_index, to_index) tuples defining the coupling graph.
 
     Returns:
         Dictionary mapping (source_index, target_index) to shortest path length.
-
-    See Also:
-        - https://docs.python.org/3.13/library/functools.html#functools.lru_cache
-        - https://networkx.org/documentation/stable/reference/algorithms/shortest_paths.html
     """
-    # Reconstruct graph from edges
+    # Check device cache first
+    cached = quariadne.device_cache.get_topology_by_edges(edges)
+    if cached is not None:
+        return cached.distances
+
+    # Fall back to computation for unknown topologies
     graph: nx.Graph[int] = nx.Graph()
     for from_idx, to_idx in edges:
         graph.add_edge(from_idx, to_idx)
 
-    # Compute all-pairs shortest paths
     distances: dict[tuple[int, int], int] = {}
     all_pairs = dict(nx.all_pairs_shortest_path_length(graph))
 
@@ -134,11 +140,7 @@ def _compute_all_pairs_shortest_paths(
 ) -> ShortestPathsDict:
     """Compute shortest paths for all pairs of nodes in a coupling graph.
 
-    Uses LRU cache to avoid recomputation for the same hardware topology.
-    The cache key is a frozenset of edge tuples identifying the graph structure.
-
-    Complements `_compute_all_pairs_distances` which returns path lengths only.
-    This function returns the actual paths needed for SWAP sequence generation.
+    Checks device cache first for known backends, falls back to computation.
 
     Args:
         edges: Frozenset of (from_index, to_index) tuples defining the coupling graph.
@@ -146,22 +148,20 @@ def _compute_all_pairs_shortest_paths(
     Returns:
         Dictionary mapping (source_index, target_index) to list of node indices
         representing the shortest path from source to target (inclusive).
-
-    See Also:
-        - https://docs.python.org/3.13/library/functools.html#functools.lru_cache
-        - https://networkx.org/documentation/stable/reference/algorithms/shortest_paths.html
     """
-    # Reconstruct undirected graph from edge tuples
-    # SWAP operations are symmetric, so we use undirected graph
+    # Check device cache first
+    cached = quariadne.device_cache.get_topology_by_edges(edges)
+    if cached is not None:
+        # Convert tuples to lists for compatibility
+        return {key: list(path) for key, path in cached.paths.items()}
+
+    # Fall back to computation for unknown topologies
     graph: nx.Graph[int] = nx.Graph()
     for from_idx, to_idx in edges:
         graph.add_edge(from_idx, to_idx)
 
-    # Compute all-pairs shortest paths using NetworkX
-    # Returns dict of dicts: {source: {target: [path], ...}, ...}
     all_pairs_paths = dict(nx.all_pairs_shortest_path(graph))
 
-    # Flatten into single dictionary with tuple keys for efficient lookup
     paths: ShortestPathsDict = {}
     for source_node, target_paths in all_pairs_paths.items():
         for target_node, path_nodes in target_paths.items():
@@ -214,6 +214,7 @@ class BipartiteAllocationResult:
         operation_edge_assignment: Dict mapping operation index to assigned edge.
         operation_to_edge_by_qubits: Dict mapping (qubit1, qubit2, occurrence) to edge.
         initial_mapping: Initial logical-to-physical qubit mapping.
+        final_mapping: Qubit mapping after all operations (for windowed solving).
         operations: List of operations in LP order for reference.
         inserted_swaps: Dict mapping two-qubit operation index to list of PhysicalSwap
             objects. Swaps for operation i should be inserted before that operation.
@@ -230,6 +231,7 @@ class BipartiteAllocationResult:
     initial_mapping: dict[
         quariadne.circuit.LogicalQubit, quariadne.circuit.PhysicalQubit
     ]
+    final_mapping: dict[quariadne.circuit.LogicalQubit, quariadne.circuit.PhysicalQubit]
     operations: list[quariadne.circuit.QuantumOperation]
     inserted_swaps: dict[int, list[quariadne.circuit.PhysicalSwap]]
 
@@ -303,14 +305,20 @@ class BipartiteAllocationRouter:
         self,
         coupling_map: nx.DiGraph,
         quantum_circuit: quariadne.circuit.AbstractQuantumCircuit,
+        fixed_operation_edges: dict[int, int] | None = None,
     ) -> None:
         """Initialise the bipartite allocation router.
 
         Args:
             coupling_map: NetworkX DiGraph representing physical qubit connectivity
             quantum_circuit: Abstract quantum circuit to be routed
+            fixed_operation_edges: Optional dict mapping operation index to edge index.
+                When provided, fixes the edge assignment for specified operations.
+                Used for windowed solving where the shared layer's assignments from
+                window k become constraints for window k+1.
         """
         self.coupling_map = coupling_map
+        self.fixed_operation_edges = fixed_operation_edges
         self.qubit_count = coupling_map.number_of_nodes()
         self.routed_circuit = copy.deepcopy(quantum_circuit)
 
@@ -473,6 +481,10 @@ class BipartiteAllocationRouter:
 
         Returns:
             List of layers, where each layer is a list of operation indices.
+
+        Reference:
+            - https://docs.python.org/3/library/functions.html#max
+            - https://docs.python.org/3/library/functions.html#enumerate
         """
         if self.operation_count == 0:
             return []
@@ -603,7 +615,15 @@ class BipartiteAllocationRouter:
             Configured HiGHS model ready for optimisation
         """
         h = highspy.Highs()
-        h.silent()
+        h.setOptionValue("output_flag", False)
+        h.setOptionValue("log_to_console", False)
+
+        # Configure HiPO solver with PARDISO for parallel sparse linear algebra
+        h.setOptionValue("solver", quariadne.benchmarks.constants.HIPO_SOLVER_NAME)
+        h.setOptionValue(
+            "hipo_system_solver", quariadne.benchmarks.constants.HIPO_SYSTEM_SOLVER
+        )
+        h.setOptionValue("threads", quariadne.benchmarks.constants.HIPO_DEFAULT_THREADS)
 
         # Add all variables
         self._add_variables(h)
@@ -616,45 +636,87 @@ class BipartiteAllocationRouter:
         # Set objective
         self._set_objective(h)
 
+        # Fix operations from shared layer (for windowed solving)
+        self._add_fixed_operation_constraints(h)
+
         return h
 
     def _add_variables(self, h: highspy.Highs) -> None:
         """Add all decision variables to the model.
 
+        Uses batch HiGHS API for performance - adds all variables in one call
+        instead of individual addVar() calls.
+
         Args:
             h: HiGHS model instance
+
+        Reference:
+            - HiGHS Python API: https://ergo-code.github.io/HiGHS/dev/interfaces/python/
         """
         inf = highspy.kHighsInf
 
-        # Add y variables (binary: operation-edge assignment)
-        for _ in range(self.y_var_count):
-            h.addVar(0.0, 1.0)
+        # Pre-allocate arrays for batch variable addition
+        lower_bounds = np.zeros(self.total_var_count, dtype=np.float64)
+        upper_bounds = np.empty(self.total_var_count, dtype=np.float64)
 
-        # Add z variables (continuous non-negative: flow variables)
-        for _ in range(self.z_var_count):
-            h.addVar(0.0, inf)
+        # y variables: bounds [0, 1] (binary semantics via LP relaxation)
+        upper_bounds[: self.y_var_count] = 1.0
 
-        # Set y variables as binary (integers with bounds [0,1])
-        for var_idx in range(self.y_var_count):
-            h.changeColIntegrality(var_idx, highspy.HighsVarType.kInteger)
+        # z variables: bounds [0, inf] (continuous non-negative flow)
+        upper_bounds[self.y_var_count :] = inf
+
+        # Add all variables in one batch call
+        h.addVars(self.total_var_count, lower_bounds, upper_bounds)
+
+        # NOTE: y variables are NOT set as integers despite bounds [0,1].
+        # The constraint matrix is totally unimodular (TU), so the LP relaxation
+        # yields integral solutions at vertices. This avoids MIP (NP-hard) and
+        # uses pure LP (polynomial time).
 
     def _add_operation_uniqueness_constraints(self, h: highspy.Highs) -> None:
         """Add constraints: each operation assigned to exactly one edge.
 
         Constraint: Σ_e y_{o,e} = 1 for each operation o
 
+        Uses batch HiGHS API for performance - builds CSR matrix and adds all
+        rows in one call instead of individual addRow() calls.
+
         Args:
             h: HiGHS model instance
-        """
-        for op_idx in range(self.operation_count):
-            indices = []
-            values = []
-            for edge_idx in range(self.edge_count):
-                var_idx = self._get_y_var_index(op_idx, edge_idx)
-                indices.append(var_idx)
-                values.append(1.0)
 
-            h.addRow(1.0, 1.0, len(indices), indices, values)
+        Reference:
+            - HiGHS Python API: https://ergo-code.github.io/HiGHS/dev/interfaces/python/
+        """
+        num_constraints = self.operation_count
+        nonzeros_per_constraint = self.edge_count
+        total_nonzeros = num_constraints * nonzeros_per_constraint
+
+        # Pre-allocate CSR format arrays
+        lower_bounds = np.ones(num_constraints, dtype=np.float64)
+        upper_bounds = np.ones(num_constraints, dtype=np.float64)
+        row_starts = np.arange(
+            0, total_nonzeros + 1, nonzeros_per_constraint, dtype=np.int32
+        )
+        col_indices = np.empty(total_nonzeros, dtype=np.int32)
+        values = np.ones(total_nonzeros, dtype=np.float64)
+
+        # Fill column indices: for each operation, include all edge y variables
+        for op_idx in range(self.operation_count):
+            start_idx = op_idx * self.edge_count
+            for edge_idx in range(self.edge_count):
+                col_indices[start_idx + edge_idx] = self._get_y_var_index(
+                    op_idx, edge_idx
+                )
+
+        h.addRows(
+            num_constraints,
+            lower_bounds,
+            upper_bounds,
+            total_nonzeros,
+            row_starts,
+            col_indices,
+            values,
+        )
 
     def _add_edge_exclusivity_constraints(self, h: highspy.Highs) -> None:
         """Add constraints: each physical position used at most once per layer.
@@ -682,12 +744,13 @@ class BipartiteAllocationRouter:
             position_to_edge_indices[source].append(edge_idx)
             position_to_edge_indices[target].append(edge_idx)
 
-        # Add constraints for each layer and position
-        for layer in self.operation_layers:
-            if len(layer) <= 1:
-                # Single operation per layer: constraints trivially satisfied
-                continue
+        # Filter layers with multiple operations (single-operation layers are trivially satisfied)
+        multi_operation_layers = [
+            layer for layer in self.operation_layers if len(layer) > 1
+        ]
 
+        # Add constraints for each layer and position
+        for layer in multi_operation_layers:
             for position, edge_indices in position_to_edge_indices.items():
                 # Combined position constraint: Σ_{o at t, e : p ∈ e} y_{o,e} ≤ 1
                 constraint_indices = []
@@ -715,61 +778,101 @@ class BipartiteAllocationRouter:
             - Outflow from o': Σ_e z^l_{o, e', e} = y_{o', e'} for each e'
             - Inflow to o: Σ_{e'} z^l_{o, e', e} = y_{o, e} for each e
 
+        Uses batch HiGHS API for performance - builds CSR matrix and adds all rows
+        in one call instead of individual addRow() calls.
+
         Args:
             h: HiGHS model instance
+
+        Reference:
+            - HiGHS Python API: https://ergo-code.github.io/HiGHS/dev/interfaces/python/
         """
+        num_transitions = len(self.flow_transitions)
+        num_constraints = num_transitions * 2 * self.edge_count
+        nonzeros_per_constraint = self.edge_count + 1
+        total_nonzeros = num_constraints * nonzeros_per_constraint
+
+        # Pre-allocate CSR format arrays
+        lower_bounds = np.zeros(num_constraints, dtype=np.float64)
+        upper_bounds = np.zeros(num_constraints, dtype=np.float64)
+        row_starts = np.empty(num_constraints + 1, dtype=np.int32)
+        col_indices = np.empty(total_nonzeros, dtype=np.int32)
+        values = np.empty(total_nonzeros, dtype=np.float64)
+
+        row_idx = 0
+        nonzero_idx = 0
+
         for trans_idx, transition in enumerate(self.flow_transitions):
             from_op = transition.from_operation_index
             to_op = transition.to_operation_index
 
-            # Outflow constraints: Σ_e z^l_{o, e', e} = y_{o', e'} for each e'
+            # Outflow constraints
             for from_edge_idx in range(self.edge_count):
-                indices = []
-                values = []
+                row_starts[row_idx] = nonzero_idx
 
-                # Add z variables (positive coefficient)
                 for to_edge_idx in range(self.edge_count):
                     z_idx = self._get_z_var_index(trans_idx, from_edge_idx, to_edge_idx)
-                    indices.append(z_idx)
-                    values.append(1.0)
+                    col_indices[nonzero_idx] = z_idx
+                    values[nonzero_idx] = 1.0
+                    nonzero_idx += 1
 
-                # Add y variable (negative coefficient for RHS)
                 y_idx = self._get_y_var_index(from_op, from_edge_idx)
-                indices.append(y_idx)
-                values.append(-1.0)
+                col_indices[nonzero_idx] = y_idx
+                values[nonzero_idx] = -1.0
+                nonzero_idx += 1
+                row_idx += 1
 
-                h.addRow(0.0, 0.0, len(indices), indices, values)
-
-            # Inflow constraints: Σ_{e'} z^l_{o, e', e} = y_{o, e} for each e
+            # Inflow constraints
             for to_edge_idx in range(self.edge_count):
-                indices = []
-                values = []
+                row_starts[row_idx] = nonzero_idx
 
-                # Add z variables (positive coefficient)
                 for from_edge_idx in range(self.edge_count):
                     z_idx = self._get_z_var_index(trans_idx, from_edge_idx, to_edge_idx)
-                    indices.append(z_idx)
-                    values.append(1.0)
+                    col_indices[nonzero_idx] = z_idx
+                    values[nonzero_idx] = 1.0
+                    nonzero_idx += 1
 
-                # Add y variable (negative coefficient for RHS)
                 y_idx = self._get_y_var_index(to_op, to_edge_idx)
-                indices.append(y_idx)
-                values.append(-1.0)
+                col_indices[nonzero_idx] = y_idx
+                values[nonzero_idx] = -1.0
+                nonzero_idx += 1
+                row_idx += 1
 
-                h.addRow(0.0, 0.0, len(indices), indices, values)
+        row_starts[num_constraints] = total_nonzeros
+
+        h.addRows(
+            num_constraints,
+            lower_bounds,
+            upper_bounds,
+            total_nonzeros,
+            row_starts,
+            col_indices,
+            values,
+        )
 
     def _set_objective(self, h: highspy.Highs) -> None:
         """Set the objective function: minimise total distance.
 
         Objective: Σ dist(pos_l(e'), pos_l(e)) · z^l_{o, e', e}
 
+        Uses batch HiGHS API for performance - sets all z variable costs in one call
+        instead of individual changeColCost() calls.
+
         Args:
             h: HiGHS model instance
+
+        Reference:
+            - HiGHS Python API: https://ergo-code.github.io/HiGHS/dev/interfaces/python/
         """
         # Set objective sense to minimise
         h.changeObjectiveSense(highspy.ObjSense.kMinimize)
 
-        # Set coefficients for z variables based on distances
+        # Pre-allocate arrays for batch API call
+        z_indices = np.empty(self.z_var_count, dtype=np.int32)
+        z_costs = np.empty(self.z_var_count, dtype=np.float64)
+
+        # Compute all z variable objective coefficients
+        idx = 0
         for trans_idx, transition in enumerate(self.flow_transitions):
             qubit = transition.qubit
             from_op = transition.from_operation_index
@@ -790,71 +893,73 @@ class BipartiteAllocationRouter:
                     distance = self.distance_matrix[(from_position, to_position)]
                     z_idx = self._get_z_var_index(trans_idx, from_edge_idx, to_edge_idx)
 
-                    h.changeColCost(z_idx, float(distance))
+                    z_indices[idx] = z_idx
+                    z_costs[idx] = float(distance)
+                    idx += 1
 
-    @dataclass
-    class EdgePairSelection:
-        """Result of selecting the best (source_edge, target_edge) pair for a transition.
+        # Set all z variable costs in one batch call
+        h.changeColsCost(self.z_var_count, z_indices, z_costs)
 
-        Attributes:
-            source_edge_index: Index into self.edges for the source edge (e').
-            target_edge_index: Index into self.edges for the target edge (e).
-            z_value: The z flow variable value for this edge pair.
-        """
+    def _add_fixed_operation_constraints(self, h: highspy.Highs) -> None:
+        """Fix y variables for operations with pre-assigned edges.
 
-        source_edge_index: int
-        target_edge_index: int
-        z_value: float
+        When fixed_operation_edges is provided (for windowed solving), fixes the
+        edge assignment for specified operations. The shared layer's assignments
+        from the previous window become constraints for the current window.
 
-    def _generate_edge_pair_candidates(
-        self,
-        transition_idx: int,
-        col_values: list[float],
-    ) -> "Generator[BipartiteAllocationRouter.EdgePairSelection, None, None]":
-        """Generate all edge pair candidates with their z values for a transition.
+        For each fixed operation:
+        - Set y_{op, assigned_edge} bounds to [1, 1] (force to 1)
+        - Set y_{op, other_edges} bounds to [0, 0] (force to 0)
 
         Args:
-            transition_idx: Index of the flow transition in self.flow_transitions.
-            col_values: Solution variable values from the LP solver.
+            h: HiGHS model instance
 
-        Yields:
-            EdgePairSelection for each (source_edge, target_edge) combination.
+        Reference:
+            - HiGHS Python API: https://ergo-code.github.io/HiGHS/dev/interfaces/python/
         """
-        for source_edge_idx in range(self.edge_count):
-            for target_edge_idx in range(self.edge_count):
-                z_var_idx = self._get_z_var_index(
-                    transition_idx, source_edge_idx, target_edge_idx
-                )
-                z_value = col_values[z_var_idx]
-                yield BipartiteAllocationRouter.EdgePairSelection(
-                    source_edge_index=source_edge_idx,
-                    target_edge_index=target_edge_idx,
-                    z_value=z_value,
-                )
+        if self.fixed_operation_edges is None:
+            return
+
+        for op_idx, assigned_edge_idx in self.fixed_operation_edges.items():
+            for edge_idx in range(self.edge_count):
+                y_idx = self._get_y_var_index(op_idx, edge_idx)
+                if edge_idx == assigned_edge_idx:
+                    h.changeColBounds(y_idx, 1.0, 1.0)
+                else:
+                    h.changeColBounds(y_idx, 0.0, 0.0)
 
     def _find_best_edge_pair_for_transition(
         self,
         transition_idx: int,
         col_values: list[float],
-    ) -> EdgePairSelection:
+    ) -> tuple[int, int]:
         """Find the (source_edge, target_edge) pair with maximum z value for a transition.
 
-        For the given flow transition, iterates through all possible (e', e) edge pairs
-        and returns the one with the highest z variable value. This is more robust than
-        a simple threshold for handling fractional LP solutions.
+        For the given flow transition, finds the (e', e) edge pair with the highest
+        z variable value using numpy argmax. This is more robust than a simple
+        threshold for handling fractional LP solutions.
 
         Args:
             transition_idx: Index of the flow transition in self.flow_transitions.
             col_values: Solution variable values from the LP solver.
 
         Returns:
-            EdgePairSelection containing the best source/target edge indices and z value.
+            Tuple of (source_edge_index, target_edge_index) for the best edge pair.
 
-        Raises:
-            ValueError: If no edges exist (edge_count is 0), propagated from max().
+        Reference:
+            - https://numpy.org/doc/stable/reference/generated/numpy.argmax.html
         """
-        candidates = self._generate_edge_pair_candidates(transition_idx, col_values)
-        return max(candidates, key=lambda selection: selection.z_value)
+        # Get the start index for this transition's z variables
+        z_block_start = self._get_z_var_index(transition_idx, 0, 0)
+        z_block_size = self.edge_count * self.edge_count
+
+        # Extract z values for this transition and find argmax
+        z_block = np.array(col_values[z_block_start : z_block_start + z_block_size])
+        best_flat_idx = int(np.argmax(z_block))
+
+        # Convert flat index to (from_edge, to_edge) pair
+        source_edge_idx, target_edge_idx = divmod(best_flat_idx, self.edge_count)
+        return source_edge_idx, target_edge_idx
 
     def _extract_swaps_from_z_variables(
         self,
@@ -900,13 +1005,13 @@ class BipartiteAllocationRouter:
             logical_qubit = transition.qubit
 
             # Find the edge pair with maximum z value for this transition
-            best_edge_pair = self._find_best_edge_pair_for_transition(
+            source_edge_idx, target_edge_idx = self._find_best_edge_pair_for_transition(
                 transition_idx, col_values
             )
 
             # Get the actual edges from indices
-            source_edge = self.edges[best_edge_pair.source_edge_index]
-            target_edge = self.edges[best_edge_pair.target_edge_index]
+            source_edge = self.edges[source_edge_idx]
+            target_edge = self.edges[target_edge_idx]
 
             # Determine where the qubit sits at source and target operations
             source_physical_position = self._get_qubit_position_in_edge(
@@ -971,17 +1076,21 @@ class BipartiteAllocationRouter:
         solution = h.getSolution()
         col_values = solution.col_value
 
-        # Extract operation-edge assignments from y variables
+        # Extract operation-edge assignments from y variables using greedy rounding.
+        # For LP relaxation, y values are fractional. We pick the edge with
+        # the highest y value for each operation (greedy argmax rounding).
+        # Uses numpy for vectorised argmax instead of Python loops.
+        y_values = np.array(col_values[: self.y_var_count]).reshape(
+            self.operation_count, self.edge_count
+        )
+        best_edge_indices = np.argmax(y_values, axis=1)
+
         operation_edge_assignment: dict[
             int, tuple[quariadne.circuit.PhysicalQubit, quariadne.circuit.PhysicalQubit]
-        ] = {}
-
-        for op_idx in range(self.operation_count):
-            for edge_idx in range(self.edge_count):
-                y_idx = self._get_y_var_index(op_idx, edge_idx)
-                if col_values[y_idx] > 0.5:  # Binary variable is 1
-                    operation_edge_assignment[op_idx] = self.edges[edge_idx]
-                    break
+        ] = {
+            op_idx: self.edges[best_edge_indices[op_idx]]
+            for op_idx in range(self.operation_count)
+        }
 
         # Build operation_to_edge_by_qubits for lookup by qubit pair
         # Key: (qubit1_idx, qubit2_idx, occurrence_count)
@@ -1008,6 +1117,9 @@ class BipartiteAllocationRouter:
         # Derive initial mapping using bipartite matching for unique positions
         initial_mapping = self._derive_initial_mapping(operation_edge_assignment)
 
+        # Extract final mapping for windowed solving
+        final_mapping = self._extract_final_mapping(operation_edge_assignment)
+
         # Extract swaps from z flow variables
         inserted_swaps = self._extract_swaps_from_z_variables(
             col_values, operation_edge_assignment
@@ -1018,6 +1130,7 @@ class BipartiteAllocationRouter:
             operation_edge_assignment=operation_edge_assignment,
             operation_to_edge_by_qubits=operation_to_edge_by_qubits,
             initial_mapping=initial_mapping,
+            final_mapping=final_mapping,
             operations=list(self.operations),
             inserted_swaps=inserted_swaps,
         )
@@ -1097,6 +1210,47 @@ class BipartiteAllocationRouter:
 
         return initial_mapping
 
+    def _extract_final_mapping(
+        self,
+        operation_edge_assignment: dict[
+            int, tuple[quariadne.circuit.PhysicalQubit, quariadne.circuit.PhysicalQubit]
+        ],
+    ) -> dict[quariadne.circuit.LogicalQubit, quariadne.circuit.PhysicalQubit]:
+        """Extract qubit positions after all operations.
+
+        For each qubit involved in two-qubit operations, finds its position at
+        its last operation. Used for windowed solving where the final positions
+        become constraints for the next window.
+
+        Args:
+            operation_edge_assignment: Mapping from operation index to assigned edge
+
+        Returns:
+            Final logical-to-physical qubit mapping
+        """
+        final_mapping: dict[
+            quariadne.circuit.LogicalQubit, quariadne.circuit.PhysicalQubit
+        ] = {}
+
+        for qubit, op_info in self.qubit_operations.items():
+            if not op_info.operation_indices:
+                continue
+
+            last_op_idx = op_info.operation_indices[-1]
+            if last_op_idx not in operation_edge_assignment:
+                continue
+
+            edge = operation_edge_assignment[last_op_idx]
+            operation = self.operations[last_op_idx]
+            left_qubit, right_qubit = operation.qubits_participating
+
+            if qubit == left_qubit:
+                final_mapping[qubit] = edge[0]
+            elif qubit == right_qubit:
+                final_mapping[qubit] = edge[1]
+
+        return final_mapping
+
     def run(self) -> BipartiteAllocationResult:
         """Run the bipartite allocation LP optimisation.
 
@@ -1114,17 +1268,452 @@ class BipartiteAllocationRouter:
                 operation_edge_assignment={},
                 operation_to_edge_by_qubits={},
                 initial_mapping=trivial_mapping,
+                final_mapping=trivial_mapping,
                 operations=[],
                 inserted_swaps={},
             )
 
         # Build and solve the model
+        t0 = time.perf_counter()
         h = self._build_model()
+        t1 = time.perf_counter()
+        _logger.info(
+            "Model built: %d vars, %d constraints in %.2fs",
+            h.getNumCol(),
+            h.getNumRow(),
+            t1 - t0,
+        )
+
         h.run()
+        t2 = time.perf_counter()
+        _logger.info("LP solved in %.2fs", t2 - t1)
 
         # Check solution status
         model_status = h.getModelStatus()
         if model_status != highspy.HighsModelStatus.kOptimal:
             raise RuntimeError(f"LP optimisation failed with status: {model_status}")
 
-        return self._extract_solution(h)
+        result = self._extract_solution(h)
+        t3 = time.perf_counter()
+        _logger.info("Solution extracted in %.2fs", t3 - t2)
+
+        return result
+
+
+class WindowedBipartiteRouter(BipartiteAllocationRouter):
+    """Windowed version of BipartiteAllocationRouter.
+
+    Solves large circuits in overlapping windows of N layers. Each window
+    shares its last layer with the next window's first layer for continuity.
+    """
+
+    def __init__(
+        self,
+        coupling_map: nx.DiGraph,
+        quantum_circuit: quariadne.circuit.AbstractQuantumCircuit,
+        window_size: int = 5,
+    ) -> None:
+        """Initialise windowed router."""
+        super().__init__(coupling_map, quantum_circuit)
+        if window_size < 2:
+            raise ValueError("window_size must be at least 2")
+        self.window_size = window_size
+
+    def _compute_windows(self) -> list[tuple[int, int]]:
+        """Compute overlapping window boundaries.
+
+        Returns:
+            List of (start_layer, end_layer) tuples
+        """
+        n = len(self.operation_layers)
+        if n == 0:
+            return []
+
+        windows = []
+        start = 0
+        while start < n:
+            end = min(start + self.window_size, n)
+            windows.append((start, end))
+            if end >= n:
+                break
+            start = end - 1  # 1-layer overlap
+        return windows
+
+    def _create_subcircuit(
+        self, operation_indices: list[int]
+    ) -> quariadne.circuit.AbstractQuantumCircuit:
+        """Create a sub-circuit containing only the specified operations.
+
+        Constructs a new AbstractQuantumCircuit with the same qubits as the
+        original circuit but containing only the operations at the given indices.
+        Used to partition the circuit into windows for separate LP solving.
+
+        Args:
+            operation_indices: List of indices into self.operations specifying
+                which two-qubit operations to include in the sub-circuit.
+
+        Returns:
+            A new AbstractQuantumCircuit containing only the selected operations,
+            preserving the original qubit set.
+
+        Reference:
+            - https://docs.python.org/3/library/stdtypes.html#list
+        """
+        selected_operations = [self.operations[op_idx] for op_idx in operation_indices]
+        return quariadne.circuit.AbstractQuantumCircuit(
+            qubits=self.routed_circuit.qubits,
+            operations=selected_operations,
+        )
+
+    def _build_global_to_local_index_map(
+        self, window_operation_indices: list[int]
+    ) -> dict[int, int]:
+        """Build a mapping from global operation indices to window-local indices.
+
+        When solving a window, operations are re-indexed starting from 0 within
+        the window's sub-circuit. This mapping allows conversion between the
+        global indices (in self.operations) and local indices (in the window).
+
+        Args:
+            window_operation_indices: List of global operation indices that appear
+                in this window, in the order they appear in the sub-circuit.
+
+        Returns:
+            Dictionary mapping global_index -> local_index. For example, if
+            window_operation_indices=[5, 8, 12], returns {5: 0, 8: 1, 12: 2}.
+        """
+        global_to_local_map = {}
+        for local_index, global_index in enumerate(window_operation_indices):
+            global_to_local_map[global_index] = local_index
+        return global_to_local_map
+
+    def _convert_constraints_to_local_indices(
+        self,
+        global_fixed_edges: dict[int, int] | None,
+        global_to_local_map: dict[int, int],
+    ) -> dict[int, int] | None:
+        """Convert edge constraints from global to window-local operation indices.
+
+        The shared layer's operation-edge assignments from the previous window
+        are expressed in global indices. This method converts them to the local
+        indices used by the current window's BipartiteAllocationRouter.
+
+        Args:
+            global_fixed_edges: Constraints from previous window mapping
+                global_operation_index -> edge_index. None if this is the first window.
+            global_to_local_map: Mapping from global to local indices for this window.
+
+        Returns:
+            Dictionary mapping local_operation_index -> edge_index for operations
+            that exist in both the constraints and the current window. Returns None
+            if no constraints apply to this window.
+        """
+        if global_fixed_edges is None:
+            return None
+
+        local_fixed_edges = {}
+        for global_op_idx, edge_idx in global_fixed_edges.items():
+            if global_op_idx in global_to_local_map:
+                local_op_idx = global_to_local_map[global_op_idx]
+                local_fixed_edges[local_op_idx] = edge_idx
+
+        return local_fixed_edges if local_fixed_edges else None
+
+    def _solve_window(
+        self,
+        window_operation_indices: list[int],
+        global_fixed_edges: dict[int, int] | None,
+    ) -> tuple[BipartiteAllocationResult, BipartiteAllocationRouter, dict[int, int]]:
+        """Solve the LP for a single window of operations.
+
+        Creates a sub-circuit containing only the window's operations, converts
+        any fixed constraints from global to local indices, and runs a fresh
+        BipartiteAllocationRouter on the sub-circuit.
+
+        Args:
+            window_operation_indices: Global operation indices in this window.
+            global_fixed_edges: Edge constraints from previous window's shared layer,
+                mapping global_operation_index -> edge_index. None for first window.
+
+        Returns:
+            Tuple containing:
+                - BipartiteAllocationResult from solving the window
+                - BipartiteAllocationRouter instance (for accessing edge_to_index)
+                - global_to_local_map for converting results back to global indices
+        """
+        global_to_local_map = self._build_global_to_local_index_map(
+            window_operation_indices
+        )
+
+        local_fixed_edges = self._convert_constraints_to_local_indices(
+            global_fixed_edges, global_to_local_map
+        )
+
+        window_circuit = self._create_subcircuit(window_operation_indices)
+
+        window_router = BipartiteAllocationRouter(
+            self.coupling_map,
+            window_circuit,
+            fixed_operation_edges=local_fixed_edges,
+        )
+
+        window_result = window_router.run()
+
+        return window_result, window_router, global_to_local_map
+
+    def _extract_shared_layer_constraints(
+        self,
+        shared_layer_index: int,
+        window_result: BipartiteAllocationResult,
+        window_router: BipartiteAllocationRouter,
+        global_to_local_map: dict[int, int],
+    ) -> dict[int, int]:
+        """Extract edge constraints from the shared layer for the next window.
+
+        The shared layer (last layer of current window) becomes the first layer
+        of the next window. This method extracts the operation-edge assignments
+        that will be fixed as constraints in the next window's LP.
+
+        Args:
+            shared_layer_index: Index of the shared layer in self.operation_layers.
+            window_result: Result from solving the current window.
+            window_router: Router instance used for the current window.
+            global_to_local_map: Mapping from global to local indices.
+
+        Returns:
+            Dictionary mapping global_operation_index -> edge_index for all
+            operations in the shared layer.
+        """
+        # Get all operations in the shared layer (using global indices)
+        shared_layer_global_ops = self.operation_layers[shared_layer_index]
+        constraints = {}
+
+        for global_op_idx in shared_layer_global_ops:
+            # Check if this operation was part of the window we just solved
+            is_in_window = global_op_idx in global_to_local_map
+
+            if is_in_window:
+                # Convert to local index to look up in window result
+                local_op_idx = global_to_local_map[global_op_idx]
+
+                # Verify the operation has an edge assignment in the result
+                has_assignment = local_op_idx in window_result.operation_edge_assignment
+
+                if has_assignment:
+                    # Get the assigned edge (as PhysicalQubit tuple)
+                    assigned_edge = window_result.operation_edge_assignment[
+                        local_op_idx
+                    ]
+
+                    # Convert edge tuple to edge index for constraint storage
+                    edge_index = window_router.edge_to_index[assigned_edge]
+
+                    # Store constraint using global operation index
+                    constraints[global_op_idx] = edge_index
+
+        return constraints
+
+    def _accumulate_window_results(
+        self,
+        window_result: BipartiteAllocationResult,
+        window_operation_indices: list[int],
+        accumulated_edge_assignments: dict[
+            int, tuple[quariadne.circuit.PhysicalQubit, quariadne.circuit.PhysicalQubit]
+        ],
+        accumulated_swaps: dict[int, list[quariadne.circuit.PhysicalSwap]],
+    ) -> None:
+        """Accumulate results from a window into the global result containers.
+
+        Converts window-local indices back to global indices and merges the
+        edge assignments and swap sequences into the accumulated containers.
+
+        Args:
+            window_result: Result from solving a single window.
+            window_operation_indices: Global operation indices in this window.
+            accumulated_edge_assignments: Global container for edge assignments (modified).
+            accumulated_swaps: Global container for swap sequences (modified).
+        """
+        # Convert local edge assignments to global indices
+        for (
+            local_op_idx,
+            assigned_edge,
+        ) in window_result.operation_edge_assignment.items():
+            global_op_idx = window_operation_indices[local_op_idx]
+            accumulated_edge_assignments[global_op_idx] = assigned_edge
+
+        # Convert local swap sequences to global indices
+        for local_op_idx, swap_list in window_result.inserted_swaps.items():
+            global_op_idx = window_operation_indices[local_op_idx]
+
+            # Initialise list if first swaps for this operation
+            if global_op_idx not in accumulated_swaps:
+                accumulated_swaps[global_op_idx] = []
+
+            # Extend with swaps from this window
+            accumulated_swaps[global_op_idx].extend(swap_list)
+
+    def _build_final_result(
+        self,
+        total_objective: float,
+        accumulated_edge_assignments: dict[
+            int, tuple[quariadne.circuit.PhysicalQubit, quariadne.circuit.PhysicalQubit]
+        ],
+        accumulated_swaps: dict[int, list[quariadne.circuit.PhysicalSwap]],
+        initial_mapping: dict[
+            quariadne.circuit.LogicalQubit, quariadne.circuit.PhysicalQubit
+        ],
+    ) -> BipartiteAllocationResult:
+        """Build the final BipartiteAllocationResult from accumulated window results.
+
+        Constructs the operation_to_edge_by_qubits lookup table and final_mapping
+        from the accumulated edge assignments across all windows.
+
+        Args:
+            total_objective: Sum of objective values from all windows.
+            accumulated_edge_assignments: Merged edge assignments (global indices).
+            accumulated_swaps: Merged swap sequences (global indices).
+            initial_mapping: Initial mapping from the first window.
+
+        Returns:
+            Complete BipartiteAllocationResult for the entire circuit.
+        """
+        # Build operation_to_edge_by_qubits lookup table
+        operation_to_edge_by_qubits: dict[
+            tuple[int, int, int],
+            tuple[quariadne.circuit.PhysicalQubit, quariadne.circuit.PhysicalQubit],
+        ] = {}
+        qubit_pair_occurrence_counts: dict[tuple[int, int], int] = {}
+
+        for op_idx, operation in enumerate(self.operations):
+            qubit_left, qubit_right = operation.qubits_participating
+            qubit_pair_key = (qubit_left.index, qubit_right.index)
+
+            # Track occurrence count for this qubit pair
+            occurrence = qubit_pair_occurrence_counts.get(qubit_pair_key, 0)
+            qubit_pair_occurrence_counts[qubit_pair_key] = occurrence + 1
+
+            # Store edge assignment with (qubit1, qubit2, occurrence) key
+            if op_idx in accumulated_edge_assignments:
+                full_key = (qubit_left.index, qubit_right.index, occurrence)
+                operation_to_edge_by_qubits[full_key] = accumulated_edge_assignments[
+                    op_idx
+                ]
+
+        # Build final mapping from last operations of each qubit
+        final_mapping: dict[
+            quariadne.circuit.LogicalQubit, quariadne.circuit.PhysicalQubit
+        ] = {}
+
+        # Process operations in reverse to find last assignment for each qubit
+        for op_idx in reversed(range(len(self.operations))):
+            if op_idx in accumulated_edge_assignments:
+                operation = self.operations[op_idx]
+                assigned_edge = accumulated_edge_assignments[op_idx]
+                qubit_left, qubit_right = operation.qubits_participating
+                edge_left, edge_right = assigned_edge
+
+                # Assign qubit to edge endpoint if not already assigned
+                if qubit_left not in final_mapping:
+                    final_mapping[qubit_left] = edge_left
+                if qubit_right not in final_mapping:
+                    final_mapping[qubit_right] = edge_right
+
+        return BipartiteAllocationResult(
+            objective_value=total_objective,
+            operation_edge_assignment=accumulated_edge_assignments,
+            operation_to_edge_by_qubits=operation_to_edge_by_qubits,
+            initial_mapping=initial_mapping,
+            final_mapping=final_mapping,
+            operations=list(self.operations),
+            inserted_swaps=accumulated_swaps,
+        )
+
+    def run(self) -> BipartiteAllocationResult:
+        """Run windowed bipartite allocation optimisation.
+
+        Overrides the parent run() method to solve large circuits in overlapping
+        windows. For small circuits (fewer layers than window_size), delegates
+        to the parent's single-solve approach.
+
+        Returns:
+            BipartiteAllocationResult containing the merged solution from all windows.
+        """
+        # For small circuits, use the parent's single-solve approach
+        num_layers = len(self.operation_layers)
+        if num_layers <= self.window_size:
+            _logger.info("Circuit has %d layers, using single solve", num_layers)
+            return super().run()
+
+        # Compute overlapping windows
+        windows = self._compute_windows()
+        _logger.info(
+            "Windowed solving: %d layers, %d windows (size=%d)",
+            num_layers,
+            len(windows),
+            self.window_size,
+        )
+
+        # Initialise accumulators for results across windows
+        accumulated_edge_assignments: dict[
+            int, tuple[quariadne.circuit.PhysicalQubit, quariadne.circuit.PhysicalQubit]
+        ] = {}
+        accumulated_swaps: dict[int, list[quariadne.circuit.PhysicalSwap]] = {}
+        total_objective = 0.0
+        initial_mapping = None
+
+        # Constraints from previous window's shared layer
+        global_fixed_edges: dict[int, int] | None = None
+
+        # Solve each window sequentially
+        for window_index, (start_layer, end_layer) in enumerate(windows):
+            _logger.info(
+                "Window %d/%d: layers [%d, %d)",
+                window_index + 1,
+                len(windows),
+                start_layer,
+                end_layer,
+            )
+
+            # Collect all operation indices in this window's layers
+            window_operation_indices = []
+            for layer_index in range(start_layer, end_layer):
+                window_operation_indices.extend(self.operation_layers[layer_index])
+
+            # Solve this window
+            window_result, window_router, global_to_local_map = self._solve_window(
+                window_operation_indices, global_fixed_edges
+            )
+
+            # Accumulate objective value
+            total_objective += window_result.objective_value
+
+            # Store initial mapping from first window only
+            if initial_mapping is None:
+                initial_mapping = window_result.initial_mapping
+
+            # Merge window results into accumulators
+            self._accumulate_window_results(
+                window_result,
+                window_operation_indices,
+                accumulated_edge_assignments,
+                accumulated_swaps,
+            )
+
+            # Extract constraints for next window from shared layer
+            is_not_last_window = end_layer < num_layers
+            if is_not_last_window:
+                shared_layer_index = end_layer - 1
+                global_fixed_edges = self._extract_shared_layer_constraints(
+                    shared_layer_index,
+                    window_result,
+                    window_router,
+                    global_to_local_map,
+                )
+
+        # Build and return final result
+        return self._build_final_result(
+            total_objective,
+            accumulated_edge_assignments,
+            accumulated_swaps,
+            initial_mapping or {},
+        )

@@ -11,6 +11,9 @@ References:
 from enum import StrEnum
 from pathlib import Path
 
+import networkx as nx
+import qiskit.transpiler
+
 
 # -----------------------------------------------------------------------------
 # Logging Configuration
@@ -47,6 +50,14 @@ DEFAULT_BACKEND = "Aspen-4"
 # Relative paths from project root
 DEFAULT_BENCHMARK_DIR = Path("QUEKO-benchmark")
 DEFAULT_OUTPUT_DIR = Path("benches/results")
+
+# Topology cache file (relative to quariadne package)
+TOPOLOGY_CACHE_FILENAME = "topology_cache.pkl.gz"
+TOPOLOGY_CACHE_SUBDIR = "data"
+TOPOLOGY_CACHE_MISSING_WARNING = (
+    "Topology cache not found. Run 'python -m quariadne.device_cache' to generate."
+)
+EMPTY_TOPOLOGY_CACHE: dict = {}
 
 
 # -----------------------------------------------------------------------------
@@ -391,3 +402,124 @@ BACKEND_EDGES = {
 
 # List of available backend names for CLI validation
 AVAILABLE_BACKENDS = list(BACKEND_EDGES.keys())
+
+
+def create_backend_coupling_map(backend_name: str) -> qiskit.transpiler.CouplingMap:
+    """Create a Qiskit CouplingMap from backend edge list.
+
+    Converts the undirected edges in BACKEND_EDGES to bidirectional directed
+    edges required by Qiskit's CouplingMap.
+
+    Args:
+        backend_name: Name of the backend (must be in BACKEND_EDGES).
+
+    Returns:
+        Qiskit CouplingMap object with directed edges.
+
+    Raises:
+        KeyError: If backend_name is not in BACKEND_EDGES.
+
+    Reference:
+        - Qiskit CouplingMap: https://docs.quantum.ibm.com/api/qiskit/qiskit.transpiler.CouplingMap
+    """
+    edgelist_undirected = BACKEND_EDGES[backend_name]
+
+    # Convert undirected edges to bidirectional directed edges
+    graph_undirected = nx.from_edgelist(edgelist_undirected)
+    edgelist_directed = graph_undirected.to_directed()
+    directed_edgelist = list(edgelist_directed.edges())
+    coupling_map = qiskit.transpiler.CouplingMap(directed_edgelist)
+    return coupling_map
+
+
+# -----------------------------------------------------------------------------
+# Scaling Benchmark Configuration
+# -----------------------------------------------------------------------------
+
+# Qubit counts for scaling study (limited by Ourense's 5 physical qubits)
+SCALING_QUBIT_COUNTS = [3, 4, 5]
+
+# Circuit types for structured pattern benchmarks
+CIRCUIT_TYPES = ["random_clifford", "linear_chain", "ring", "star"]
+
+# Number of samples per configuration for statistical significance
+DEFAULT_SAMPLES_PER_CONFIG = 10
+
+# Gate count multiplier for random circuits: num_gates = num_qubits * this factor
+DEFAULT_GATES_PER_QUBIT = 5
+
+# Base seed for reproducible random circuit generation
+SCALING_SEED_BASE = 42
+
+# Output file extension for pgfplots-compatible data files
+DAT_EXTENSION = ".dat"
+
+# Subdirectory for scaling benchmark results
+SCALING_OUTPUT_SUBDIR = Path("scaling")
+
+
+# -----------------------------------------------------------------------------
+# HiPO Solver Configuration
+# -----------------------------------------------------------------------------
+
+# HiPO solver with PARDISO backend for parallel sparse linear algebra
+# Ref: https://github.com/strategy155/HiGHS (hipo-solvers branch)
+HIPO_SOLVER_NAME = "hipo"
+HIPO_SYSTEM_SOLVER = "pardiso"
+HIPO_DEFAULT_THREADS = 8
+
+
+# -----------------------------------------------------------------------------
+# Comprehensive Benchmark Configuration
+# -----------------------------------------------------------------------------
+# Benchmarking suite for 5-16 qubit circuits on Aspen-4 topology.
+# Reference: User research notes on routing benchmarking methodology
+
+# Qubit count tiers for benchmarking (matching Aspen-4's 16 qubits)
+BENCHMARK_TIER_SMALL: list[int] = [5, 6, 7, 8]  # Fast iteration, all routers
+BENCHMARK_TIER_MEDIUM: list[int] = [9, 10, 11, 12]  # Moderate complexity
+BENCHMARK_TIER_LARGE: list[int] = [13, 14, 15, 16]  # LP router stress test
+
+# Combined qubit counts (Aspen-4 compatible)
+COMPREHENSIVE_QUBIT_COUNTS: list[int] = (
+    BENCHMARK_TIER_SMALL + BENCHMARK_TIER_MEDIUM + BENCHMARK_TIER_LARGE
+)
+
+# Extended circuit types for comprehensive benchmarking
+# Reference: Maslov 2008, Pozzi 2020, Saeedi 2011
+COMPREHENSIVE_CIRCUIT_TYPES: list[str] = [
+    "random_clifford",  # Random Clifford gates (CX + H)
+    "linear_chain",  # Sequential CX chain pattern
+    "ring",  # Complete cycle CX pattern
+    "star",  # Hub-and-spoke CX pattern
+    "qft_like",  # QFT-inspired all-to-all pattern
+    "full_layer",  # Dense parallel CX layers (Pozzi 2020)
+    "depth_controlled",  # Random with controlled circuit depth
+]
+
+# Watts-Strogatz synthetic topology parameters
+# Reference: NetworkX watts_strogatz_graph documentation
+# https://networkx.org/documentation/stable/reference/generated/networkx.generators.random_graphs.watts_strogatz_graph.html
+WATTS_STROGATZ_K_VALUES: list[int] = [4, 6]  # Nearest neighbours to connect
+WATTS_STROGATZ_P_VALUES: list[float] = [0.1, 0.3, 0.5]  # Rewiring probability
+
+# Default depth multiplier for depth-controlled circuits
+DEPTH_MULTIPLIER_DEFAULT: int = 2  # depth = num_qubits * multiplier
+
+# Default number of layers for full-layer circuits
+FULL_LAYER_DEFAULT_LAYERS: int = 4
+
+# Router timeout configuration (in seconds)
+# IlpRouter uses exact MILP (slower), LP routers are faster
+ROUTER_TIMEOUT_CONFIG: dict[str, int] = {
+    "IlpRouter": 900,  # 15 minutes (user preference: 10-20 min)
+    "LpRouterMapping": 600,  # 10 minutes
+    "LpRouterEdges": 600,  # 10 minutes
+    "BipartiteAllocationRouter": 300,  # 5 minutes
+    "SABRE": 60,  # 1 minute
+    "BASIC": 60,  # 1 minute
+    "LOOKAHEAD": 60,  # 1 minute
+}
+
+# Output subdirectory for comprehensive benchmark results
+COMPREHENSIVE_OUTPUT_SUBDIR = Path("comprehensive")
