@@ -39,15 +39,13 @@ The LP relaxation (with binary y variables) solves the following problem:
 
 LP Relaxation Properties
 ------------------------
-The constraint matrix exhibits total unimodularity (TU). The position exclusivity
-constraints have bipartite incidence structure: each y_{o,e} variable appears in
-at most one constraint per layer (for any position p ∈ e). Combined with the flow
-conservation constraints (which form a transportation problem), the full matrix
-remains TU.
+Each constraint block has total unimodular (TU) structure individually:
+operation uniqueness (assignment), position exclusivity (bipartite incidence),
+and flow conservation (transportation). The combined matrix may yield fractional
+y solutions; greedy argmax rounding selects the best edge per operation.
 
-When the y variables are fixed, the z subproblem becomes a transportation problem
-with integral extreme points. The HiGHS solver typically finds integral solutions
-even without explicit integrality constraints on z.
+When y variables are integral, the z subproblem is a transportation problem
+with guaranteed integral extreme points.
 
 Implementation Notes
 --------------------
@@ -80,6 +78,7 @@ import logging
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import TYPE_CHECKING
 
 import highspy
@@ -91,6 +90,90 @@ import quariadne.circuit
 import quariadne.device_cache
 
 _logger = logging.getLogger(__name__)
+
+# =============================================================================
+# Type Aliases
+# =============================================================================
+# Per https://docs.python.org/3/library/typing.html#type-aliases
+
+type EdgeIndex = int
+type OperationIndex = int
+type TransitionIndex = int
+type PhysicalEdge = tuple[
+    quariadne.circuit.PhysicalQubit, quariadne.circuit.PhysicalQubit
+]
+
+# =============================================================================
+# Named Constants
+# =============================================================================
+# Following milp.py style pattern for explicit constant definitions
+# Ref: https://google.github.io/styleguide/pyguide.html#s2.14-named-arguments
+
+# Constraint bound constants (matching milp.py naming convention)
+EQUALITY_BOUND_ONE = 1.0
+EQUALITY_BOUND_ZERO = 0.0
+
+# Coefficient constants for constraint matrices
+COEFFICIENT_POSITIVE = 1.0
+COEFFICIENT_NEGATIVE = -1.0
+
+# Variable bound constants for LP formulation
+Y_VARIABLE_LOWER_BOUND = 0.0
+Y_VARIABLE_UPPER_BOUND = 1.0
+Z_VARIABLE_LOWER_BOUND = 0.0
+
+# Default numpy dtype for constraint arrays
+CONSTRAINT_ARRAY_DTYPE = np.float64
+INDEX_ARRAY_DTYPE = np.int32
+
+
+# =============================================================================
+# Variable Type Enum and Registry Constants
+# =============================================================================
+# Following milp.py RoutingVariableType pattern
+
+
+class BipartiteVariableType(Enum):
+    """Enum for variable types in bipartite allocation LP.
+
+    Attributes:
+        Y_OPERATION_EDGE: Binary variable y_{o,e} indicating operation o assigned to edge e.
+        Z_FLOW: Continuous flow variable z^l_{o,e',e} tracking qubit movement.
+    """
+
+    Y_OPERATION_EDGE = "y_operation_edge"
+    Z_FLOW = "z_flow"
+
+
+# Variable registry field constants (matching milp.py naming)
+VARIABLE_COUNT = "count"
+VARIABLE_OFFSET = "offset"
+
+
+@dataclass
+class BipartiteLPSolverOptions:
+    """Configuration options for HiGHS LP solver in bipartite allocation.
+
+    Centralises solver configuration following the HiGHSSolverOptions pattern
+    from milp.py. Used to configure the HiGHS instance before solving.
+
+    Attributes:
+        output_flag: Whether to display solver output. Defaults to False.
+        log_to_console: Whether to log to console. Defaults to False.
+        solver: LP solver algorithm name. Uses HiPO with PARDISO by default.
+        hipo_system_solver: System solver for HiPO. Uses PARDISO by default.
+        threads: Number of threads for parallel solving.
+
+    Ref: https://ergo-code.github.io/HiGHS/dev/options/definitions/
+    Ref: https://github.com/strategy155/HiGHS (hipo-solvers branch)
+    """
+
+    output_flag: bool = False
+    log_to_console: bool = False
+    solver: str = quariadne.benchmarks.constants.HIPO_SOLVER_NAME
+    hipo_system_solver: str = quariadne.benchmarks.constants.HIPO_SYSTEM_SOLVER
+    threads: int = quariadne.benchmarks.constants.HIPO_DEFAULT_THREADS
+
 
 if TYPE_CHECKING:
     import qiskit.transpiler
@@ -523,6 +606,8 @@ class BipartiteAllocationRouter:
             [y_{0,0}, y_{0,1}, ..., y_{O-1,E-1}, z^{l1}_{...}, z^{l2}_{...}, ...]
 
         where O is operation count and E is edge count.
+
+        Also builds the variable_types registry following milp.py pattern.
         """
         # y variables: operation_count × edge_count
         self.y_var_count = self.operation_count * self.edge_count
@@ -535,6 +620,18 @@ class BipartiteAllocationRouter:
         self.z_var_offset = self.y_var_count
 
         self.total_var_count = self.y_var_count + self.z_var_count
+
+        # Variable type registry (following milp.py pattern)
+        self.variable_types: dict[BipartiteVariableType, dict[str, int]] = {
+            BipartiteVariableType.Y_OPERATION_EDGE: {
+                VARIABLE_COUNT: self.y_var_count,
+                VARIABLE_OFFSET: self.y_var_offset,
+            },
+            BipartiteVariableType.Z_FLOW: {
+                VARIABLE_COUNT: self.z_var_count,
+                VARIABLE_OFFSET: self.z_var_offset,
+            },
+        }
 
         # Build transition index mapping
         self.transition_to_index: dict[tuple[int, int, int], int] = {}
@@ -608,22 +705,28 @@ class BipartiteAllocationRouter:
         else:
             raise ValueError(f"Qubit {qubit} not in operation {operation_index}")
 
-    def _build_model(self) -> highspy.Highs:
+    def _build_model(
+        self, solver_options: BipartiteLPSolverOptions | None = None
+    ) -> highspy.Highs:
         """Build the HiGHS LP model with all variables and constraints.
 
+        Args:
+            solver_options: Optional solver configuration. Uses defaults if None.
+
         Returns:
-            Configured HiGHS model ready for optimisation
+            Configured HiGHS model ready for optimisation.
         """
+        if solver_options is None:
+            solver_options = BipartiteLPSolverOptions()
+
         h = highspy.Highs()
-        h.setOptionValue("output_flag", False)
-        h.setOptionValue("log_to_console", False)
+        h.setOptionValue("output_flag", solver_options.output_flag)
+        h.setOptionValue("log_to_console", solver_options.log_to_console)
 
         # Configure HiPO solver with PARDISO for parallel sparse linear algebra
-        h.setOptionValue("solver", quariadne.benchmarks.constants.HIPO_SOLVER_NAME)
-        h.setOptionValue(
-            "hipo_system_solver", quariadne.benchmarks.constants.HIPO_SYSTEM_SOLVER
-        )
-        h.setOptionValue("threads", quariadne.benchmarks.constants.HIPO_DEFAULT_THREADS)
+        h.setOptionValue("solver", solver_options.solver)
+        h.setOptionValue("hipo_system_solver", solver_options.hipo_system_solver)
+        h.setOptionValue("threads", solver_options.threads)
 
         # Add all variables
         self._add_variables(h)
@@ -656,11 +759,11 @@ class BipartiteAllocationRouter:
         inf = highspy.kHighsInf
 
         # Pre-allocate arrays for batch variable addition
-        lower_bounds = np.zeros(self.total_var_count, dtype=np.float64)
-        upper_bounds = np.empty(self.total_var_count, dtype=np.float64)
+        lower_bounds = np.zeros(self.total_var_count, dtype=CONSTRAINT_ARRAY_DTYPE)
+        upper_bounds = np.empty(self.total_var_count, dtype=CONSTRAINT_ARRAY_DTYPE)
 
         # y variables: bounds [0, 1] (binary semantics via LP relaxation)
-        upper_bounds[: self.y_var_count] = 1.0
+        upper_bounds[: self.y_var_count] = Y_VARIABLE_UPPER_BOUND
 
         # z variables: bounds [0, inf] (continuous non-negative flow)
         upper_bounds[self.y_var_count :] = inf
@@ -692,13 +795,19 @@ class BipartiteAllocationRouter:
         total_nonzeros = num_constraints * nonzeros_per_constraint
 
         # Pre-allocate CSR format arrays
-        lower_bounds = np.ones(num_constraints, dtype=np.float64)
-        upper_bounds = np.ones(num_constraints, dtype=np.float64)
-        row_starts = np.arange(
-            0, total_nonzeros + 1, nonzeros_per_constraint, dtype=np.int32
+        lower_bounds = np.full(
+            num_constraints, EQUALITY_BOUND_ONE, dtype=CONSTRAINT_ARRAY_DTYPE
         )
-        col_indices = np.empty(total_nonzeros, dtype=np.int32)
-        values = np.ones(total_nonzeros, dtype=np.float64)
+        upper_bounds = np.full(
+            num_constraints, EQUALITY_BOUND_ONE, dtype=CONSTRAINT_ARRAY_DTYPE
+        )
+        row_starts = np.arange(
+            0, total_nonzeros + 1, nonzeros_per_constraint, dtype=INDEX_ARRAY_DTYPE
+        )
+        col_indices = np.empty(total_nonzeros, dtype=INDEX_ARRAY_DTYPE)
+        values = np.full(
+            total_nonzeros, COEFFICIENT_POSITIVE, dtype=CONSTRAINT_ARRAY_DTYPE
+        )
 
         # Fill column indices: for each operation, include all edge y variables
         for op_idx in range(self.operation_count):
@@ -760,12 +869,12 @@ class BipartiteAllocationRouter:
                     for edge_idx in edge_indices:
                         var_idx = self._get_y_var_index(op_idx, edge_idx)
                         constraint_indices.append(var_idx)
-                        constraint_values.append(1.0)
+                        constraint_values.append(COEFFICIENT_POSITIVE)
 
                 if len(constraint_indices) > 1:
                     h.addRow(
                         -highspy.kHighsInf,
-                        1.0,
+                        EQUALITY_BOUND_ONE,
                         len(constraint_indices),
                         constraint_indices,
                         constraint_values,
@@ -793,11 +902,15 @@ class BipartiteAllocationRouter:
         total_nonzeros = num_constraints * nonzeros_per_constraint
 
         # Pre-allocate CSR format arrays
-        lower_bounds = np.zeros(num_constraints, dtype=np.float64)
-        upper_bounds = np.zeros(num_constraints, dtype=np.float64)
-        row_starts = np.empty(num_constraints + 1, dtype=np.int32)
-        col_indices = np.empty(total_nonzeros, dtype=np.int32)
-        values = np.empty(total_nonzeros, dtype=np.float64)
+        lower_bounds = np.full(
+            num_constraints, EQUALITY_BOUND_ZERO, dtype=CONSTRAINT_ARRAY_DTYPE
+        )
+        upper_bounds = np.full(
+            num_constraints, EQUALITY_BOUND_ZERO, dtype=CONSTRAINT_ARRAY_DTYPE
+        )
+        row_starts = np.empty(num_constraints + 1, dtype=INDEX_ARRAY_DTYPE)
+        col_indices = np.empty(total_nonzeros, dtype=INDEX_ARRAY_DTYPE)
+        values = np.empty(total_nonzeros, dtype=CONSTRAINT_ARRAY_DTYPE)
 
         row_idx = 0
         nonzero_idx = 0
@@ -813,12 +926,12 @@ class BipartiteAllocationRouter:
                 for to_edge_idx in range(self.edge_count):
                     z_idx = self._get_z_var_index(trans_idx, from_edge_idx, to_edge_idx)
                     col_indices[nonzero_idx] = z_idx
-                    values[nonzero_idx] = 1.0
+                    values[nonzero_idx] = COEFFICIENT_POSITIVE
                     nonzero_idx += 1
 
                 y_idx = self._get_y_var_index(from_op, from_edge_idx)
                 col_indices[nonzero_idx] = y_idx
-                values[nonzero_idx] = -1.0
+                values[nonzero_idx] = COEFFICIENT_NEGATIVE
                 nonzero_idx += 1
                 row_idx += 1
 
@@ -829,12 +942,12 @@ class BipartiteAllocationRouter:
                 for from_edge_idx in range(self.edge_count):
                     z_idx = self._get_z_var_index(trans_idx, from_edge_idx, to_edge_idx)
                     col_indices[nonzero_idx] = z_idx
-                    values[nonzero_idx] = 1.0
+                    values[nonzero_idx] = COEFFICIENT_POSITIVE
                     nonzero_idx += 1
 
                 y_idx = self._get_y_var_index(to_op, to_edge_idx)
                 col_indices[nonzero_idx] = y_idx
-                values[nonzero_idx] = -1.0
+                values[nonzero_idx] = COEFFICIENT_NEGATIVE
                 nonzero_idx += 1
                 row_idx += 1
 
@@ -868,8 +981,8 @@ class BipartiteAllocationRouter:
         h.changeObjectiveSense(highspy.ObjSense.kMinimize)
 
         # Pre-allocate arrays for batch API call
-        z_indices = np.empty(self.z_var_count, dtype=np.int32)
-        z_costs = np.empty(self.z_var_count, dtype=np.float64)
+        z_indices = np.empty(self.z_var_count, dtype=INDEX_ARRAY_DTYPE)
+        z_costs = np.empty(self.z_var_count, dtype=CONSTRAINT_ARRAY_DTYPE)
 
         # Compute all z variable objective coefficients
         idx = 0
@@ -924,9 +1037,13 @@ class BipartiteAllocationRouter:
             for edge_idx in range(self.edge_count):
                 y_idx = self._get_y_var_index(op_idx, edge_idx)
                 if edge_idx == assigned_edge_idx:
-                    h.changeColBounds(y_idx, 1.0, 1.0)
+                    h.changeColBounds(
+                        y_idx, Y_VARIABLE_UPPER_BOUND, Y_VARIABLE_UPPER_BOUND
+                    )
                 else:
-                    h.changeColBounds(y_idx, 0.0, 0.0)
+                    h.changeColBounds(
+                        y_idx, Y_VARIABLE_LOWER_BOUND, Y_VARIABLE_LOWER_BOUND
+                    )
 
     def _find_best_edge_pair_for_transition(
         self,
@@ -1264,7 +1381,7 @@ class BipartiteAllocationRouter:
                 for qubit in self.routed_circuit.qubits
             }
             return BipartiteAllocationResult(
-                objective_value=0.0,
+                objective_value=EQUALITY_BOUND_ZERO,
                 operation_edge_assignment={},
                 operation_to_edge_by_qubits={},
                 initial_mapping=trivial_mapping,
