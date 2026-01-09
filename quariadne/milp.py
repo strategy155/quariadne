@@ -4,6 +4,7 @@ import numpy as np
 from dataclasses import dataclass, field, asdict
 from enum import Enum
 
+import quariadne.benchmarks.constants
 import quariadne.circuit
 import scipy.optimize
 import scipy.sparse
@@ -127,11 +128,18 @@ class HiGHSSolverOptions:
     Attributes:
         time_limit: Maximum solver runtime in seconds. If the solver exceeds
                    this limit, it returns the best solution found so far.
+        threads: Number of threads for parallel solving.
+        solver: LP solver algorithm ("hipo" for HiPO solver with PARDISO).
+        hipo_system_solver: System solver for HiPO ("pardiso" for MKL PARDISO).
 
     Ref: https://ergo-code.github.io/HiGHS/dev/options/definitions/
+    Ref: https://github.com/strategy155/HiGHS (hipo-solvers branch)
     """
 
     time_limit: float
+    threads: int = quariadne.benchmarks.constants.HIPO_DEFAULT_THREADS
+    solver: str = quariadne.benchmarks.constants.HIPO_SOLVER_NAME
+    hipo_system_solver: str = quariadne.benchmarks.constants.HIPO_SYSTEM_SOLVER
 
 
 def get_coupling_graph(coupling_map: qiskit.transpiler.CouplingMap) -> nx.DiGraph:
@@ -1545,8 +1553,10 @@ class MilpScipyRouter:
             self.full_decision_variables_shape, self.integrality
         )
 
-        # Configure solver options
-        solver_options = HiGHSSolverOptions(time_limit=MILP_SOLVER_TIMEOUT_SECONDS)
+        # Configure solver options with HiPO/PARDISO for parallel execution
+        solver_options = HiGHSSolverOptions(
+            time_limit=MILP_SOLVER_TIMEOUT_SECONDS,
+        )
         solver_options_dict = asdict(solver_options)
 
         # Solve the MILP problem

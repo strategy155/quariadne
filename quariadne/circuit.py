@@ -231,3 +231,26 @@ class AbstractQuantumCircuit:
             raise IndexError("Cannot shift from empty circuit")
 
         self.operations.pop(0)
+
+    def to_qiskit(self) -> qiskit.QuantumCircuit:
+        """Convert this AbstractQuantumCircuit to a Qiskit QuantumCircuit.
+
+        Creates an equivalent Qiskit QuantumCircuit with the same operations.
+        Uses the operation name to dispatch to the correct Qiskit gate method.
+
+        Returns:
+            Equivalent Qiskit QuantumCircuit.
+
+        Reference:
+            - Qiskit QuantumCircuit: https://docs.quantum.ibm.com/api/qiskit/circuit
+        """
+        num_qubits = len(self.qubits)
+        qiskit_circuit = qiskit.QuantumCircuit(num_qubits)
+
+        for operation in self.operations:
+            qubit_indices = [q.index for q in operation.qubits_participating]
+            gate_method = getattr(qiskit_circuit, operation.name, None)
+            if gate_method is not None:
+                gate_method(*qubit_indices)
+
+        return qiskit_circuit
