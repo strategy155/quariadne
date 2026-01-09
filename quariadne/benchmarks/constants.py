@@ -1,0 +1,525 @@
+"""Shared constants for benchmark configuration and CLI help strings.
+
+This module centralises all benchmark-related constants for consistency
+and future internationalisation (i18n) support.
+
+References:
+    - Python 3.13 pathlib: https://docs.python.org/3/library/pathlib.html
+    - Google Python Style Guide: https://google.github.io/styleguide/pyguide.html#317-constants
+"""
+
+from enum import StrEnum
+from pathlib import Path
+
+import networkx as nx
+import qiskit.transpiler
+
+
+# -----------------------------------------------------------------------------
+# Logging Configuration
+# -----------------------------------------------------------------------------
+
+BENCHMARK_LOG_FORMAT = "%(asctime)s - %(levelname)s - %(message)s"
+BENCHMARK_DEFAULT_LOG_LEVEL = "INFO"
+BENCHMARK_LOG_LEVELS = ["DEBUG", "INFO", "WARNING", "ERROR"]
+
+
+# -----------------------------------------------------------------------------
+# File Extensions
+# -----------------------------------------------------------------------------
+
+QASM_EXTENSION = ".qasm"
+QPY_EXTENSION = ".qpy"
+JSON_EXTENSION = ".json"
+JSON_INDENT = 2
+
+
+# -----------------------------------------------------------------------------
+# Default Values
+# -----------------------------------------------------------------------------
+
+# Qiskit optimisation level for benchmarking (0 = no optimisation)
+DEFAULT_OPTIMISATION_LEVEL = 0
+
+# Timeout in seconds (1 hour for cluster jobs)
+DEFAULT_TIMEOUT_SECONDS = 3600
+
+# Default backend for testing (Aspen-4 has 16 qubits, fits QUEKO 16QBT circuits)
+DEFAULT_BACKEND = "Aspen-4"
+
+# Relative paths from project root
+DEFAULT_BENCHMARK_DIR = Path("QUEKO-benchmark")
+DEFAULT_OUTPUT_DIR = Path("benches/results")
+
+# Topology cache file (relative to quariadne package)
+TOPOLOGY_CACHE_FILENAME = "topology_cache.pkl.gz"
+TOPOLOGY_CACHE_SUBDIR = "data"
+TOPOLOGY_CACHE_MISSING_WARNING = (
+    "Topology cache not found. Run 'python -m quariadne.device_cache' to generate."
+)
+EMPTY_TOPOLOGY_CACHE: dict = {}
+
+
+# -----------------------------------------------------------------------------
+# QUEKO Benchmark Categories
+# -----------------------------------------------------------------------------
+
+
+class QuekoCategory(StrEnum):
+    """QUEKO benchmark circuit categories.
+
+    Attributes:
+        BIGD: Big D circuits
+        BNTF: Boolean satisfiability circuits
+        BSS: BigSoft circuits
+    """
+
+    BIGD = "BIGD"
+    BNTF = "BNTF"
+    BSS = "BSS"
+
+
+# -----------------------------------------------------------------------------
+# Layout Methods
+# -----------------------------------------------------------------------------
+
+
+class LayoutMethod(StrEnum):
+    """Qiskit layout methods for initial qubit placement.
+
+    Reference: https://docs.quantum.ibm.com/api/qiskit/qiskit.transpiler.generate_preset_pass_manager
+
+    Attributes:
+        TRIVIAL: Identity mapping, no optimisation
+        DENSE: Places qubits on well-connected physical qubits
+        SABRE: SABRE-based layout optimisation
+    """
+
+    TRIVIAL = "trivial"
+    DENSE = "dense"
+    SABRE = "sabre"
+
+
+# -----------------------------------------------------------------------------
+# Routing Methods
+# -----------------------------------------------------------------------------
+
+
+class RoutingMethod(StrEnum):
+    """Routing methods for benchmarking (7 algorithms total).
+
+    Quariadne methods match entry points registered in pyproject.toml.
+    Qiskit methods use built-in routing algorithms.
+
+    Attributes:
+        QUARIADNE_ILP: Integer Linear Programming (exact solver)
+        QUARIADNE_LPM: LP with Birkhoff decomposition (mapping recovery)
+        QUARIADNE_LPE: LP with edge-based bipartite matching
+        QUARIADNE_BIPARTITE: LP-based bipartite allocation router (HiGHS solver)
+        SABRE: Qiskit SABRE routing algorithm
+        BASIC: Qiskit basic routing algorithm
+        LOOKAHEAD: Qiskit lookahead routing algorithm
+    """
+
+    # Quariadne methods (match pyproject.toml entry points)
+    QUARIADNE_ILP = "quariadne_ilp"
+    QUARIADNE_LPM = "quariadne_lpm"
+    QUARIADNE_LPE = "quariadne_lpe"
+    QUARIADNE_BIPARTITE = "quariadne_bipartite"
+
+    # Qiskit baseline methods
+    SABRE = "sabre"
+    BASIC = "basic"
+    LOOKAHEAD = "lookahead"
+
+    @property
+    def layout_method(self) -> str:
+        """Return the matching layout method for benchmark integrity.
+
+        Quariadne methods use their matching layout plugin (same name).
+        sabre routing uses sabre layout; basic/lookahead use trivial layout.
+        """
+        if self in (
+            RoutingMethod.QUARIADNE_ILP,
+            RoutingMethod.QUARIADNE_LPM,
+            RoutingMethod.QUARIADNE_LPE,
+            RoutingMethod.QUARIADNE_BIPARTITE,
+        ):
+            layout = self.value
+        elif self == RoutingMethod.SABRE:
+            layout = LayoutMethod.SABRE.value
+        else:
+            layout = LayoutMethod.TRIVIAL.value
+
+        return layout
+
+
+# -----------------------------------------------------------------------------
+# CLI Help Strings (for future i18n support)
+# -----------------------------------------------------------------------------
+
+HELP_DESCRIPTION = "Run QUEKO benchmarks for Quariadne router"
+HELP_LOG_LEVEL = "Logging level"
+HELP_OUTPUT_DIR = "Output directory for results"
+HELP_SUBCOMMAND = "Benchmark mode"
+
+# Full benchmark mode
+HELP_FULL_MODE = "Run benchmarks on all QUEKO circuits"
+HELP_BENCHMARK_DIR = "Path to QUEKO-benchmark directory"
+
+# Single circuit mode
+HELP_SINGLE_MODE = "Run benchmark on a single circuit (for local testing)"
+HELP_CIRCUIT = "Path to QASM circuit file"
+HELP_BACKEND = "Target backend"
+HELP_METHOD = "Specific routing method (default: runs all methods)"
+HELP_TIMEOUT = "Timeout per algorithm in seconds"
+
+
+# -----------------------------------------------------------------------------
+# Hardware Backend Definitions
+# -----------------------------------------------------------------------------
+
+# Coupling map edge lists for QUEKO benchmark backends
+# These define the physical qubit connectivity for each backend
+BACKEND_EDGES = {
+    "Ourense": [(0, 1), (1, 2), (1, 3), (3, 4)],
+    "Sycamore": [
+        (0, 6),
+        (1, 6),
+        (1, 7),
+        (2, 7),
+        (2, 8),
+        (3, 8),
+        (3, 9),
+        (4, 9),
+        (4, 10),
+        (5, 10),
+        (5, 11),
+        (6, 12),
+        (6, 13),
+        (7, 13),
+        (7, 14),
+        (8, 14),
+        (8, 15),
+        (9, 15),
+        (9, 16),
+        (10, 16),
+        (10, 17),
+        (11, 17),
+        (12, 18),
+        (13, 18),
+        (13, 19),
+        (14, 19),
+        (14, 20),
+        (15, 20),
+        (15, 21),
+        (16, 21),
+        (16, 22),
+        (17, 22),
+        (17, 23),
+        (18, 24),
+        (18, 25),
+        (19, 25),
+        (19, 26),
+        (20, 26),
+        (20, 27),
+        (21, 27),
+        (21, 28),
+        (22, 28),
+        (22, 29),
+        (23, 29),
+        (24, 30),
+        (25, 30),
+        (25, 31),
+        (26, 31),
+        (26, 32),
+        (27, 32),
+        (27, 33),
+        (28, 33),
+        (28, 34),
+        (29, 34),
+        (29, 35),
+        (30, 36),
+        (30, 37),
+        (31, 37),
+        (31, 38),
+        (32, 38),
+        (32, 39),
+        (33, 39),
+        (33, 40),
+        (34, 40),
+        (34, 41),
+        (35, 41),
+        (36, 42),
+        (37, 42),
+        (37, 43),
+        (38, 43),
+        (38, 44),
+        (39, 44),
+        (39, 45),
+        (40, 45),
+        (40, 46),
+        (41, 46),
+        (41, 47),
+        (42, 48),
+        (42, 49),
+        (43, 49),
+        (43, 50),
+        (44, 50),
+        (44, 51),
+        (45, 51),
+        (45, 52),
+        (46, 52),
+        (46, 53),
+        (47, 53),
+    ],
+    "Rochester": [
+        (0, 1),
+        (1, 2),
+        (2, 3),
+        (3, 4),
+        (0, 5),
+        (4, 6),
+        (5, 9),
+        (6, 13),
+        (7, 8),
+        (8, 9),
+        (9, 10),
+        (10, 11),
+        (11, 12),
+        (12, 13),
+        (13, 14),
+        (14, 15),
+        (7, 16),
+        (11, 17),
+        (15, 18),
+        (16, 19),
+        (17, 23),
+        (18, 27),
+        (19, 20),
+        (20, 21),
+        (21, 22),
+        (22, 23),
+        (23, 24),
+        (24, 25),
+        (25, 26),
+        (26, 27),
+        (21, 28),
+        (25, 29),
+        (28, 32),
+        (29, 36),
+        (30, 31),
+        (31, 32),
+        (32, 33),
+        (33, 34),
+        (34, 35),
+        (35, 36),
+        (36, 37),
+        (37, 38),
+        (30, 39),
+        (34, 40),
+        (38, 41),
+        (39, 42),
+        (40, 46),
+        (41, 50),
+        (42, 43),
+        (43, 44),
+        (44, 45),
+        (45, 46),
+        (46, 47),
+        (47, 48),
+        (48, 49),
+        (49, 50),
+        (44, 51),
+        (48, 52),
+    ],
+    "Tokyo": [
+        (0, 1),
+        (1, 2),
+        (2, 3),
+        (3, 4),
+        (0, 5),
+        (1, 6),
+        (1, 7),
+        (2, 6),
+        (2, 7),
+        (3, 8),
+        (3, 9),
+        (4, 8),
+        (4, 9),
+        (5, 6),
+        (6, 7),
+        (7, 8),
+        (8, 9),
+        (5, 10),
+        (5, 11),
+        (6, 10),
+        (6, 11),
+        (7, 12),
+        (7, 13),
+        (8, 12),
+        (8, 13),
+        (9, 14),
+        (10, 11),
+        (11, 12),
+        (12, 13),
+        (13, 14),
+        (10, 15),
+        (11, 16),
+        (11, 17),
+        (12, 16),
+        (12, 17),
+        (13, 18),
+        (13, 19),
+        (14, 18),
+        (14, 19),
+        (15, 16),
+        (16, 17),
+        (17, 18),
+        (18, 19),
+    ],
+    "Aspen-4": [
+        (0, 1),
+        (1, 2),
+        (2, 3),
+        (3, 4),
+        (4, 5),
+        (5, 6),
+        (6, 7),
+        (0, 8),
+        (3, 11),
+        (4, 12),
+        (7, 15),
+        (8, 9),
+        (9, 10),
+        (10, 11),
+        (11, 12),
+        (12, 13),
+        (13, 14),
+        (14, 15),
+    ],
+}
+
+# List of available backend names for CLI validation
+AVAILABLE_BACKENDS = list(BACKEND_EDGES.keys())
+
+
+def create_backend_coupling_map(backend_name: str) -> qiskit.transpiler.CouplingMap:
+    """Create a Qiskit CouplingMap from backend edge list.
+
+    Converts the undirected edges in BACKEND_EDGES to bidirectional directed
+    edges required by Qiskit's CouplingMap.
+
+    Args:
+        backend_name: Name of the backend (must be in BACKEND_EDGES).
+
+    Returns:
+        Qiskit CouplingMap object with directed edges.
+
+    Raises:
+        KeyError: If backend_name is not in BACKEND_EDGES.
+
+    Reference:
+        - Qiskit CouplingMap: https://docs.quantum.ibm.com/api/qiskit/qiskit.transpiler.CouplingMap
+    """
+    edgelist_undirected = BACKEND_EDGES[backend_name]
+
+    # Convert undirected edges to bidirectional directed edges
+    graph_undirected = nx.from_edgelist(edgelist_undirected)
+    edgelist_directed = graph_undirected.to_directed()
+    directed_edgelist = list(edgelist_directed.edges())
+    coupling_map = qiskit.transpiler.CouplingMap(directed_edgelist)
+    return coupling_map
+
+
+# -----------------------------------------------------------------------------
+# Scaling Benchmark Configuration
+# -----------------------------------------------------------------------------
+
+# Qubit counts for scaling study (limited by Ourense's 5 physical qubits)
+SCALING_QUBIT_COUNTS = [3, 4, 5]
+
+# Circuit types for structured pattern benchmarks
+CIRCUIT_TYPES = ["random_clifford", "linear_chain", "ring", "star"]
+
+# Number of samples per configuration for statistical significance
+DEFAULT_SAMPLES_PER_CONFIG = 10
+
+# Gate count multiplier for random circuits: num_gates = num_qubits * this factor
+DEFAULT_GATES_PER_QUBIT = 5
+
+# Base seed for reproducible random circuit generation
+SCALING_SEED_BASE = 42
+
+# Output file extension for pgfplots-compatible data files
+DAT_EXTENSION = ".dat"
+
+# Subdirectory for scaling benchmark results
+SCALING_OUTPUT_SUBDIR = Path("scaling")
+
+
+# -----------------------------------------------------------------------------
+# HiPO Solver Configuration
+# -----------------------------------------------------------------------------
+
+# HiPO solver with PARDISO backend for parallel sparse linear algebra
+# Ref: https://github.com/strategy155/HiGHS (hipo-solvers branch)
+HIPO_SOLVER_NAME = "hipo"
+HIPO_SYSTEM_SOLVER = "pardiso"
+HIPO_DEFAULT_THREADS = 8
+
+
+# -----------------------------------------------------------------------------
+# Comprehensive Benchmark Configuration
+# -----------------------------------------------------------------------------
+# Benchmarking suite for 5-16 qubit circuits on Aspen-4 topology.
+# Reference: User research notes on routing benchmarking methodology
+
+# Qubit count tiers for benchmarking (matching Aspen-4's 16 qubits)
+BENCHMARK_TIER_SMALL: list[int] = [5, 6, 7, 8]  # Fast iteration, all routers
+BENCHMARK_TIER_MEDIUM: list[int] = [9, 10, 11, 12]  # Moderate complexity
+BENCHMARK_TIER_LARGE: list[int] = [13, 14, 15, 16]  # LP router stress test
+
+# Combined qubit counts (Aspen-4 compatible)
+COMPREHENSIVE_QUBIT_COUNTS: list[int] = (
+    BENCHMARK_TIER_SMALL + BENCHMARK_TIER_MEDIUM + BENCHMARK_TIER_LARGE
+)
+
+# Extended circuit types for comprehensive benchmarking
+# Reference: Maslov 2008, Pozzi 2020, Saeedi 2011
+COMPREHENSIVE_CIRCUIT_TYPES: list[str] = [
+    "random_clifford",  # Random Clifford gates (CX + H)
+    "linear_chain",  # Sequential CX chain pattern
+    "ring",  # Complete cycle CX pattern
+    "star",  # Hub-and-spoke CX pattern
+    "qft_like",  # QFT-inspired all-to-all pattern
+    "full_layer",  # Dense parallel CX layers (Pozzi 2020)
+    "depth_controlled",  # Random with controlled circuit depth
+]
+
+# Watts-Strogatz synthetic topology parameters
+# Reference: NetworkX watts_strogatz_graph documentation
+# https://networkx.org/documentation/stable/reference/generated/networkx.generators.random_graphs.watts_strogatz_graph.html
+WATTS_STROGATZ_K_VALUES: list[int] = [4, 6]  # Nearest neighbours to connect
+WATTS_STROGATZ_P_VALUES: list[float] = [0.1, 0.3, 0.5]  # Rewiring probability
+
+# Default depth multiplier for depth-controlled circuits
+DEPTH_MULTIPLIER_DEFAULT: int = 2  # depth = num_qubits * multiplier
+
+# Default number of layers for full-layer circuits
+FULL_LAYER_DEFAULT_LAYERS: int = 4
+
+# Router timeout configuration (in seconds)
+# IlpRouter uses exact MILP (slower), LP routers are faster
+ROUTER_TIMEOUT_CONFIG: dict[str, int] = {
+    "IlpRouter": 900,  # 15 minutes (user preference: 10-20 min)
+    "LpRouterMapping": 600,  # 10 minutes
+    "LpRouterEdges": 600,  # 10 minutes
+    "BipartiteAllocationRouter": 300,  # 5 minutes
+    "SABRE": 60,  # 1 minute
+    "BASIC": 60,  # 1 minute
+    "LOOKAHEAD": 60,  # 1 minute
+}
+
+# Output subdirectory for comprehensive benchmark results
+COMPREHENSIVE_OUTPUT_SUBDIR = Path("comprehensive")

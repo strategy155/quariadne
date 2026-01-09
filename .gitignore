@@ -518,3 +518,7 @@ Sessionx.vim
 tags
 # Persistent undo
 [._]*.un~
+
+# Quariadne
+# Pre-computed topology cache (regenerate with: python -m quariadne.device_cache)
+topology_cache.pkl.gz
