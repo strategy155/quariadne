@@ -523,3 +523,7 @@ tags
 benches/results/
 logs/
 quariadne-benchmark/
+
+# Quariadne
+# Pre-computed topology cache (regenerate with: python -m quariadne.device_cache)
+topology_cache.pkl.gz
