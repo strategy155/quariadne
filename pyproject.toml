@@ -62,6 +62,7 @@ dev = [
 # Ref: https://peps.python.org/pep-0735/
 test = [
     "pytest>=9.0.0",  # Modern pytest with native TOML support
+    "pytest-html>=4.1.1",
 ]
 
 # pytest configuration using native TOML syntax (pytest 9.0+)
