@@ -199,13 +199,16 @@ def save_timing_results(
 def run_queko_benchmarks(
     queko_circuits_by_category: QuekoCircuitsByCategory,
     queko_output_dir: Path,
+    methods: list[bench_const.RoutingMethod] | None = None,
 ) -> None:
     """Run benchmarks on all QUEKO circuits across all backends and methods.
 
     Args:
         queko_circuits_by_category: Dictionary of circuit filepaths by category enum
         queko_output_dir: Base output directory for results
+        methods: List of routing methods to benchmark. If None, runs all methods.
     """
+    methods_to_run = methods or list(bench_const.RoutingMethod)
     # Benchmark each backend
     for queko_backend_name in QUEKO_BACKEND_EDGES.keys():
         logging.info(f"Starting benchmarks for backend: {queko_backend_name}")
@@ -233,7 +236,7 @@ def run_queko_benchmarks(
             for queko_circuit_path in queko_circuit_paths:
                 queko_circuit_name = queko_circuit_path.stem
 
-                for queko_routing_method in bench_const.RoutingMethod:
+                for queko_routing_method in methods_to_run:
                     # Check if already completed (QPY file exists)
                     queko_output_filepath = (
                         queko_category_output_dir
@@ -304,24 +307,29 @@ def run_queko_benchmarks(
 def run_full_benchmark(
     queko_benchmark_dir: Path,
     queko_output_dir: Path,
+    methods: list[bench_const.RoutingMethod] | None = None,
 ) -> None:
     """Run benchmarks on all QUEKO circuits.
 
     Args:
         queko_benchmark_dir: Path to QUEKO-benchmark directory.
         queko_output_dir: Output directory for results.
+        methods: List of routing methods to benchmark. If None, runs all methods.
 
     References:
         - Python 3.13 pathlib: https://docs.python.org/3/library/pathlib.html
     """
+    methods_to_run = methods or list(bench_const.RoutingMethod)
+
     logging.info("Starting QUEKO benchmarks (full mode)")
     logging.info(f"Benchmark directory: {queko_benchmark_dir}")
     logging.info(f"Output directory: {queko_output_dir}")
+    logging.info(f"Methods: {[m.value for m in methods_to_run]}")
 
     queko_output_dir.mkdir(parents=True, exist_ok=True)
 
     queko_circuits_by_category = get_queko_filepaths_by_category(queko_benchmark_dir)
-    run_queko_benchmarks(queko_circuits_by_category, queko_output_dir)
+    run_queko_benchmarks(queko_circuits_by_category, queko_output_dir, methods_to_run)
 
     logging.info("All QUEKO benchmarks completed successfully")
 
@@ -442,6 +450,14 @@ def main() -> None:
         default=bench_const.DEFAULT_BENCHMARK_DIR,
         help=bench_const.HELP_BENCHMARK_DIR,
     )
+    queko_full_parser.add_argument(
+        "--methods",
+        type=bench_const.RoutingMethod,
+        nargs="+",
+        default=list(bench_const.RoutingMethod),
+        choices=list(bench_const.RoutingMethod),
+        help="Routing methods to benchmark (default: all)",
+    )
 
     # Single circuit mode (handler to be implemented)
     queko_single_parser = queko_subparsers.add_parser(
@@ -490,6 +506,7 @@ def main() -> None:
         run_full_benchmark(
             queko_benchmark_args.benchmark_dir,
             queko_benchmark_args.output_dir,
+            methods=queko_benchmark_args.methods,
         )
     elif queko_benchmark_args.subcommand == "single":
         run_single_benchmark(

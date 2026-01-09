@@ -40,7 +40,14 @@ package = true
 
 [tool.uv.sources]
 birkhoff = { git = "ssh://git@github.com/strategy155/birkhoff.git" }
-scipy = { git = "ssh://git@github.com/strategy155/scipy.git" }
+scipy = { git = "ssh://git@github.com/strategy155/scipy.git", branch = "main" }
+highspy = { git = "ssh://git@github.com/strategy155/HiGHS.git", branch = "hipo-solvers" }
+
+[tool.uv.extra-build-dependencies]
+highspy = ["scikit-build-core", "pybind11", "numpy"]
+
+[tool.uv.extra-build-variables]
+highspy = { SKBUILD_CMAKE_ARGS = "-DHIPO=ON;-DBLAS_LIB=/opt/intel/oneapi/mkl/2025.3/lib/libmkl_rt.so", PKG_CONFIG_PATH = "/opt/intel/oneapi/mkl/2025.3/lib/pkgconfig:/usr/lib64/pkgconfig" }
 
 [build-system]
 requires = ["hatchling"]
