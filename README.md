@@ -105,6 +105,10 @@ The routing plugin depends on results from the layout plugin, making them insepa
 
 For more details on Qiskit transpiler plugins, refer to the [Qiskit Transpiler Documentation](https://quantum.cloud.ibm.com/docs/en/api/qiskit/transpiler).
 
+## Advanced: HiPO Solver
+
+For larger circuits, HiPO (High-Performance Interior Point Optimizer with PARDISO) provides faster LP solving. HiPO support is **not included in the distributed package** and requires building scipy from the [strategy155/scipy](https://github.com/strategy155/scipy) fork with `-Dhipo=enabled`.
+
 
 
 IMPORTANT DISCLAIMER: This code was written by me, with a serious help of Claude Code. Every bit of code was verified, but still there are risks. Use at your own risk. 
