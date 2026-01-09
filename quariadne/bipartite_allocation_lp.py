@@ -88,7 +88,6 @@ import numpy as np
 
 import quariadne.benchmarks.constants
 import quariadne.circuit
-import quariadne.device_cache
 
 _logger = logging.getLogger(__name__)
 
@@ -102,20 +101,12 @@ def _compute_all_pairs_distances(
 ) -> dict[tuple[int, int], int]:
     """Compute shortest path distances for a coupling graph.
 
-    Checks device cache first for known backends, falls back to computation.
-
     Args:
         edges: Frozenset of (from_index, to_index) tuples defining the coupling graph.
 
     Returns:
         Dictionary mapping (source_index, target_index) to shortest path length.
     """
-    # Check device cache first
-    cached = quariadne.device_cache.get_topology_by_edges(edges)
-    if cached is not None:
-        return cached.distances
-
-    # Fall back to computation for unknown topologies
     graph: nx.Graph[int] = nx.Graph()
     for from_idx, to_idx in edges:
         graph.add_edge(from_idx, to_idx)
@@ -140,8 +131,6 @@ def _compute_all_pairs_shortest_paths(
 ) -> ShortestPathsDict:
     """Compute shortest paths for all pairs of nodes in a coupling graph.
 
-    Checks device cache first for known backends, falls back to computation.
-
     Args:
         edges: Frozenset of (from_index, to_index) tuples defining the coupling graph.
 
@@ -149,13 +138,6 @@ def _compute_all_pairs_shortest_paths(
         Dictionary mapping (source_index, target_index) to list of node indices
         representing the shortest path from source to target (inclusive).
     """
-    # Check device cache first
-    cached = quariadne.device_cache.get_topology_by_edges(edges)
-    if cached is not None:
-        # Convert tuples to lists for compatibility
-        return {key: list(path) for key, path in cached.paths.items()}
-
-    # Fall back to computation for unknown topologies
     graph: nx.Graph[int] = nx.Graph()
     for from_idx, to_idx in edges:
         graph.add_edge(from_idx, to_idx)
