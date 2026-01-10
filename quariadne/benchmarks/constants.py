@@ -106,7 +106,7 @@ class LayoutMethod(StrEnum):
 
 
 class RoutingMethod(StrEnum):
-    """Routing methods for benchmarking (7 algorithms total).
+    """Routing methods for benchmarking (5 algorithms).
 
     Quariadne methods match entry points registered in pyproject.toml.
     Qiskit methods use built-in routing algorithms.
@@ -117,8 +117,6 @@ class RoutingMethod(StrEnum):
         QUARIADNE_LPE: LP with edge-based bipartite matching
         QUARIADNE_BIPARTITE: LP-based bipartite allocation router (HiGHS solver)
         SABRE: Qiskit SABRE routing algorithm
-        BASIC: Qiskit basic routing algorithm
-        LOOKAHEAD: Qiskit lookahead routing algorithm
     """
 
     # Quariadne methods (match pyproject.toml entry points)
@@ -127,17 +125,15 @@ class RoutingMethod(StrEnum):
     QUARIADNE_LPE = "quariadne_lpe"
     QUARIADNE_BIPARTITE = "quariadne_bipartite"
 
-    # Qiskit baseline methods
+    # Qiskit baseline method
     SABRE = "sabre"
-    BASIC = "basic"
-    LOOKAHEAD = "lookahead"
 
     @property
     def layout_method(self) -> str:
         """Return the matching layout method for benchmark integrity.
 
         Quariadne methods use their matching layout plugin (same name).
-        sabre routing uses sabre layout; basic/lookahead use trivial layout.
+        SABRE routing uses SABRE layout.
         """
         if self in (
             RoutingMethod.QUARIADNE_ILP,
@@ -146,12 +142,38 @@ class RoutingMethod(StrEnum):
             RoutingMethod.QUARIADNE_BIPARTITE,
         ):
             layout = self.value
-        elif self == RoutingMethod.SABRE:
-            layout = LayoutMethod.SABRE.value
         else:
-            layout = LayoutMethod.TRIVIAL.value
+            layout = LayoutMethod.SABRE.value
 
         return layout
+
+    @property
+    def column_name(self) -> str:
+        """Return the column name for .dat file output.
+
+        These names must match the thesis benchmark data format.
+        """
+        match self:
+            case RoutingMethod.QUARIADNE_ILP:
+                return "IlpRouter"
+            case RoutingMethod.QUARIADNE_LPM:
+                return "LpRouterMapping"
+            case RoutingMethod.QUARIADNE_LPE:
+                return "LpRouterEdges"
+            case RoutingMethod.QUARIADNE_BIPARTITE:
+                return "BipartiteAllocationRouter"
+            case RoutingMethod.SABRE:
+                return "SABRE"
+
+
+# Enabled routers for benchmarking (modify this set to enable/disable routers)
+ENABLED_ROUTERS: set[RoutingMethod] = {
+    # RoutingMethod.QUARIADNE_ILP,  # Slow, disabled for quick runs
+    # RoutingMethod.QUARIADNE_LPM,
+    # RoutingMethod.QUARIADNE_LPE,
+    RoutingMethod.QUARIADNE_BIPARTITE,
+    RoutingMethod.SABRE,
+}
 
 
 # -----------------------------------------------------------------------------
@@ -472,18 +494,15 @@ HIPO_DEFAULT_THREADS = 8
 # -----------------------------------------------------------------------------
 # Comprehensive Benchmark Configuration
 # -----------------------------------------------------------------------------
-# Benchmarking suite for 5-16 qubit circuits on Aspen-4 topology.
-# Reference: User research notes on routing benchmarking methodology
+# Benchmarking suite for 5-12 qubit circuits on Watts-Strogatz topologies.
+# Reference: Thesis Section 4.3, "from 5 to 12 qubits"
 
-# Qubit count tiers for benchmarking (matching Aspen-4's 16 qubits)
+# Qubit count tiers for benchmarking
 BENCHMARK_TIER_SMALL: list[int] = [5, 6, 7, 8]  # Fast iteration, all routers
 BENCHMARK_TIER_MEDIUM: list[int] = [9, 10, 11, 12]  # Moderate complexity
-BENCHMARK_TIER_LARGE: list[int] = [13, 14, 15, 16]  # LP router stress test
 
-# Combined qubit counts (Aspen-4 compatible)
-COMPREHENSIVE_QUBIT_COUNTS: list[int] = (
-    BENCHMARK_TIER_SMALL + BENCHMARK_TIER_MEDIUM + BENCHMARK_TIER_LARGE
-)
+# Combined qubit counts for thesis scaling study (5-12 qubits)
+COMPREHENSIVE_QUBIT_COUNTS: list[int] = BENCHMARK_TIER_SMALL + BENCHMARK_TIER_MEDIUM
 
 # Extended circuit types for comprehensive benchmarking
 # Reference: Maslov 2008, Pozzi 2020, Saeedi 2011
@@ -500,8 +519,12 @@ COMPREHENSIVE_CIRCUIT_TYPES: list[str] = [
 # Watts-Strogatz synthetic topology parameters
 # Reference: NetworkX watts_strogatz_graph documentation
 # https://networkx.org/documentation/stable/reference/generated/networkx.generators.random_graphs.watts_strogatz_graph.html
-WATTS_STROGATZ_K_VALUES: list[int] = [4, 6]  # Nearest neighbours to connect
+WATTS_STROGATZ_K_VALUES: list[int] = [2, 3, 4]  # Nearest neighbours to connect
 WATTS_STROGATZ_P_VALUES: list[float] = [0.1, 0.3, 0.5]  # Rewiring probability
+
+# Default W-S parameters for thesis benchmarks (single fixed configuration)
+WATTS_STROGATZ_DEFAULT_K: int = 3
+WATTS_STROGATZ_DEFAULT_P: float = 0.3
 
 # Default depth multiplier for depth-controlled circuits
 DEPTH_MULTIPLIER_DEFAULT: int = 2  # depth = num_qubits * multiplier
@@ -512,13 +535,11 @@ FULL_LAYER_DEFAULT_LAYERS: int = 4
 # Router timeout configuration (in seconds)
 # IlpRouter uses exact MILP (slower), LP routers are faster
 ROUTER_TIMEOUT_CONFIG: dict[str, int] = {
-    "IlpRouter": 900,  # 15 minutes (user preference: 10-20 min)
+    "IlpRouter": 900,  # 15 minutes
     "LpRouterMapping": 600,  # 10 minutes
     "LpRouterEdges": 600,  # 10 minutes
     "BipartiteAllocationRouter": 300,  # 5 minutes
     "SABRE": 60,  # 1 minute
-    "BASIC": 60,  # 1 minute
-    "LOOKAHEAD": 60,  # 1 minute
 }
 
 # Output subdirectory for comprehensive benchmark results

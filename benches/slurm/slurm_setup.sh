@@ -61,7 +61,7 @@ readonly QUARIADNE_BRANCH="dev"
 
 # Benchmark parameters
 readonly BACKENDS=("Ourense" "Sycamore" "Rochester" "Tokyo" "Aspen-4")
-readonly METHODS=("sabre" "basic" "lookahead" "quariadne_ilp" "quariadne_lpm" "quariadne_lpe")
+readonly METHODS=("sabre" "quariadne_ilp" "quariadne_lpm" "quariadne_lpe" "quariadne_bipartite")
 
 # ============================================================================
 # Setup
