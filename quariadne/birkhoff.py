@@ -35,7 +35,9 @@ __version__ = "0.0.6.dev0"
 
 #: Any number smaller than this will be rounded down to 0 when computing the
 #: difference between NumPy arrays of floats.
-TOLERANCE = np.finfo(np.float64).eps * 10.0
+#: Note: Original value was np.finfo(np.float64).eps * 10.0 (~2.22e-15), but LP
+#: solver outputs often have numerical noise exceeding this threshold.
+TOLERANCE = 1e-9
 
 
 def to_permutation_matrix(matches):
@@ -221,10 +223,23 @@ def birkhoff_von_neumann_decomposition(D):
         #     covered by earlier key/value pairs,
         #   - ensure that all values are less than ``n``.
         #
-        # TODO: temporary fix because matching sometimes leaves some of the nodes unmatched
-        #  , we need to dive deeper! Maybe tolerance?
+        # Handle incomplete matching by retrying with more aggressive rounding.
+        # LP solver outputs may have numerical noise that creates spurious edges
+        # in the bipartite graph, preventing a perfect matching.
         if len(M) < 2 * n:
-            break
+            # Apply more aggressive rounding and retry
+            S = np.round(S, decimals=8)
+            S[S < TOLERANCE] = 0.0
+
+            # Rebuild pattern and bipartite matrices
+            W = to_pattern_matrix(S)
+            X = to_bipartite_matrix(W)
+            G = from_numpy_array(X)
+            M = maximum_matching(G, left_nodes)
+
+            # If still failing after retry, give up on this decomposition
+            if len(M) < 2 * n:
+                break
         M = {u: v % n for u, v in M.items() if u < n}
         # Convert that perfect matching to a permutation matrix.
         P = to_permutation_matrix(M)

@@ -4,7 +4,7 @@ from collections import defaultdict
 import networkx as nx
 import numpy as np
 
-from birkhoff import birkhoff_von_neumann_decomposition
+from quariadne.birkhoff import birkhoff_von_neumann_decomposition
 import scipy.optimize
 
 import quariadne.circuit
@@ -24,6 +24,130 @@ BIPARTITE_FORCING_TERM = 1e-6
 
 # Type alias for operation-to-edge assignment: (operation_index, edge_index)
 OperationEdgeAssignment = tuple[int, int]
+
+
+# Tolerance for considering LP movement variables as non-zero
+MOVEMENT_TOLERANCE = 1e-9
+
+
+def _follow_qubit_movement_chain(
+    qubit_movement_variables: np.ndarray,
+    logical_qubit_index: int,
+    source_physical_index: int,
+    target_physical_index: int,
+) -> list[tuple[int, int]]:
+    """Follow a single logical qubit's movement chain through timesteps.
+
+    Implements the inner loop of thesis Algorithm 1, building a swap chain
+    by following non-zero movement entries from source to target position.
+
+    Args:
+        qubit_movement_variables: 4D array (timesteps, logical, physical, physical).
+        logical_qubit_index: Index of the logical qubit to track.
+        source_physical_index: Starting physical qubit position.
+        target_physical_index: Destination physical qubit position.
+
+    Returns:
+        List of (from_physical, to_physical) tuples representing the swap chain.
+    """
+    if source_physical_index == target_physical_index:
+        return []
+
+    chain: list[tuple[int, int]] = []
+    timesteps = qubit_movement_variables.shape[0]
+    physical_qubit_count = qubit_movement_variables.shape[2]
+    current_position = source_physical_index
+
+    for timestep in range(timesteps):
+        for to_qubit in range(physical_qubit_count):
+            if to_qubit == current_position:
+                continue
+
+            movement_value = qubit_movement_variables[
+                timestep, logical_qubit_index, current_position, to_qubit
+            ]
+
+            if movement_value > MOVEMENT_TOLERANCE:
+                chain.append((current_position, to_qubit))
+                current_position = to_qubit
+                break  # Found movement for this timestep, proceed to next
+
+    return chain
+
+
+def _convert_chain_to_swaps(
+    chain: list[tuple[int, int]],
+) -> list[quariadne.circuit.PhysicalSwap]:
+    """Convert a movement chain to PhysicalSwap objects.
+
+    Args:
+        chain: List of (from_physical, to_physical) tuples.
+
+    Returns:
+        List of PhysicalSwap objects (duplicates removed via equality).
+    """
+    swaps: list[quariadne.circuit.PhysicalSwap] = []
+
+    for from_idx, to_idx in chain:
+        physical_from = quariadne.circuit.PhysicalQubit(from_idx)
+        physical_to = quariadne.circuit.PhysicalQubit(to_idx)
+        swap = quariadne.circuit.PhysicalSwap(physical_from, physical_to)
+
+        if swap not in swaps:
+            swaps.append(swap)
+
+    return swaps
+
+
+def reconstruct_swap_chains_from_mappings(
+    qubit_movement_variables: np.ndarray,
+    source_mapping: dict[
+        quariadne.circuit.LogicalQubit, quariadne.circuit.PhysicalQubit
+    ],
+    target_mapping: dict[
+        quariadne.circuit.LogicalQubit, quariadne.circuit.PhysicalQubit
+    ],
+) -> list[quariadne.circuit.PhysicalSwap]:
+    """Reconstruct swap chains from LP movement variables using known mappings.
+
+    Implements thesis Algorithm 1: Reconstruction of Optimal Swap Chains.
+    Builds swap chains by iteratively following non-zero movement entries
+    for each logical qubit from source to target position.
+
+    This correctly handles fractional LP solutions where movements may be
+    split across multiple paths by picking one valid path.
+
+    Args:
+        qubit_movement_variables: 4D array (timesteps, logical, physical, physical).
+        source_mapping: Logical to physical mapping before swaps.
+        target_mapping: Logical to physical mapping after swaps.
+
+    Returns:
+        List of PhysicalSwap objects representing all swaps needed.
+
+    References:
+        Thesis Algorithm 1: Reconstruction of Optimal Swap Chains By Known Permutations
+    """
+    all_swaps: list[quariadne.circuit.PhysicalSwap] = []
+
+    for logical_qubit in source_mapping.keys():
+        source_physical = source_mapping[logical_qubit]
+        target_physical = target_mapping[logical_qubit]
+
+        chain = _follow_qubit_movement_chain(
+            qubit_movement_variables,
+            logical_qubit.index,
+            source_physical.index,
+            target_physical.index,
+        )
+
+        qubit_swaps = _convert_chain_to_swaps(chain)
+
+        for swap in qubit_swaps:
+            if swap not in all_swaps:
+                all_swaps.append(swap)
+
+    return all_swaps
 
 
 def accumulate_edge_swaps(
@@ -514,7 +638,7 @@ class LpRouterMapping(Router):
 
         Runs a constrained routing problem with exactly two gate layers and two fixed
         permutations to recover the minimal sequence of swaps needed to transition
-        between them.
+        between them. Uses thesis Algorithm 1 for swap chain reconstruction.
 
         Args:
             previous_permutation: Permutation matrix for the previous layer
@@ -538,11 +662,16 @@ class LpRouterMapping(Router):
         )
         lp_result = lp_router.run()
 
-        # Phase 1: Accumulate edge swaps
-        swap_edges = accumulate_edge_swaps(lp_result.qubit_movement_variables)
+        # Build mappings from permutation matrices for swap reconstruction
+        source_mapping = self._build_mapping_from_permutation(previous_permutation)
+        target_mapping = self._build_mapping_from_permutation(current_permutation)
 
-        # Phase 2: Create list of swaps
-        swaps = create_swaps_from_edges(swap_edges)
+        # Reconstruct swap chains using thesis Algorithm 1
+        swaps = reconstruct_swap_chains_from_mappings(
+            lp_result.qubit_movement_variables,
+            source_mapping,
+            target_mapping,
+        )
 
         return swaps
 
