@@ -665,7 +665,7 @@ class LpRouterEdges(Router):
 
     def _split_coupling_map_to_bipartite(
         self, layer_execution_weights: np.ndarray
-    ) -> nx.Graph:
+    ) -> tuple[nx.Graph, dict[str, quariadne.circuit.PhysicalQubit]]:
         """Split coupling map nodes to create bipartite graph for matching.
 
         Each physical qubit v becomes two nodes: v_in and v_out.
@@ -677,14 +677,25 @@ class LpRouterEdges(Router):
                                      in coupling map, shape (edge_count,)
 
         Returns:
-            Bipartite graph with node-split structure. Nodes are added in order:
-            first all _in nodes (matching coupling_map.nodes order), then all _out nodes.
+            Tuple of (bipartite_graph, node_to_qubit_mapping) where:
+            - bipartite_graph: Graph with node-split structure
+            - node_to_qubit_mapping: Dict mapping bipartite node names (e.g.,
+              "PhysicalQubit(index=0)_in") to their corresponding PhysicalQubit objects
+
+        See Also:
+            NetworkX bipartite module:
+            https://networkx.org/documentation/stable/reference/algorithms/bipartite.html
         """
-        bipartite_coupling_map = nx.Graph()
+        bipartite_coupling_map: nx.Graph = nx.Graph()
+        node_to_qubit: dict[str, quariadne.circuit.PhysicalQubit] = {}
 
         for physical_qubit in self.coupling_map.nodes:
             physical_qubit_in = f"{physical_qubit}_in"
             physical_qubit_out = f"{physical_qubit}_out"
+
+            # Store reverse mapping from bipartite node names to physical qubits
+            node_to_qubit[physical_qubit_in] = physical_qubit
+            node_to_qubit[physical_qubit_out] = physical_qubit
 
             bipartite_coupling_map.add_node(physical_qubit_in, bipartite=0)
             bipartite_coupling_map.add_node(physical_qubit_out, bipartite=1)
@@ -705,7 +716,7 @@ class LpRouterEdges(Router):
                 weight=execution_weight + BIPARTITE_FORCING_TERM,
             )
 
-        return bipartite_coupling_map
+        return bipartite_coupling_map, node_to_qubit
 
     def _extract_bipartite_partitions(
         self, bipartite_graph: nx.Graph
@@ -738,6 +749,9 @@ class LpRouterEdges(Router):
         self,
         row_indices: np.ndarray,
         col_indices: np.ndarray,
+        out_partition: list[str],
+        in_partition: list[str],
+        node_to_qubit: dict[str, quariadne.circuit.PhysicalQubit],
     ) -> list[int]:
         """Translate bipartite matching result to coupling map edge indices.
 
@@ -745,36 +759,46 @@ class LpRouterEdges(Router):
         - row_indices: indices into out_partition (qubit_out nodes)
         - col_indices: indices into in_partition (qubit_in nodes)
 
-        Since partitions are built in the same order as self.coupling_map.nodes,
-        row_idx directly corresponds to the source qubit index and col_idx to
-        the target qubit index.
+        Uses explicit node_to_qubit mapping to correctly resolve physical qubits
+        from partition node names, avoiding any assumptions about partition ordering.
 
         The matching result contains two types of edges:
-        1. Forcing edges: where row_idx == col_idx, representing qubit_in <-> qubit_out
-           for the same qubit. These indicate the qubit is not involved in any gate.
-        2. Actual edges: where row_idx != col_idx, representing source_out <-> target_in,
-           which maps back to a directed edge source -> target in the coupling map.
+        1. Forcing edges: where source_qubit == target_qubit, representing
+           qubit_in <-> qubit_out for the same qubit (qubit not in any gate).
+        2. Actual edges: where source_qubit != target_qubit, representing
+           source_out <-> target_in, which maps to edge source -> target.
 
         Args:
             row_indices: Row indices from matching, indexing into out_partition
             col_indices: Column indices from matching, indexing into in_partition
+            out_partition: List of bipartite node names for the _out partition
+            in_partition: List of bipartite node names for the _in partition
+            node_to_qubit: Mapping from bipartite node names to PhysicalQubit objects
 
         Returns:
             List of edge indices into self.coupling_map.edges() for matched actual edges
+
+        See Also:
+            scipy.sparse.csgraph.min_weight_full_bipartite_matching:
+            https://docs.scipy.org/doc/scipy/reference/generated/scipy.sparse.csgraph.min_weight_full_bipartite_matching.html
         """
-        coupling_map_nodes = list(self.coupling_map.nodes)
         matched_edge_indices = []
 
         for row_idx, col_idx in zip(row_indices, col_indices):
-            source_qubit = coupling_map_nodes[row_idx]
-            target_qubit = coupling_map_nodes[col_idx]
+            # Resolve physical qubits via explicit mapping (not index assumption)
+            source_node = out_partition[row_idx]
+            target_node = in_partition[col_idx]
+
+            source_qubit = node_to_qubit[source_node]
+            target_qubit = node_to_qubit[target_node]
 
             # Skip forcing edges (self-loops indicate qubit not used in gate)
             if source_qubit != target_qubit:
                 edge = (source_qubit, target_qubit)
                 # O(1) dictionary lookup instead of O(n) list.index()
-                edge_index = self._edge_to_index[edge]
-                matched_edge_indices.append(edge_index)
+                if edge in self._edge_to_index:
+                    edge_index = self._edge_to_index[edge]
+                    matched_edge_indices.append(edge_index)
 
         return matched_edge_indices
 
@@ -915,13 +939,66 @@ class LpRouterEdges(Router):
         remaining_logical_qubits = all_logical_qubits - mapped_logical_qubits
         remaining_physical_qubits = all_physical_qubits - mapped_physical_qubits
 
-        # Phase 2: Map remaining qubits trivially (1-1 pairing)
+        # Phase 2: Map remaining qubits deterministically (sorted by index)
+        # Sorting ensures reproducible results across runs
+        # See: https://docs.python.org/3/library/stdtypes.html#set (sets are unordered)
+        remaining_logical_sorted = sorted(
+            remaining_logical_qubits, key=lambda q: q.index
+        )
+        remaining_physical_sorted = sorted(
+            remaining_physical_qubits, key=lambda q: q.index
+        )
+
         for logical_qubit, physical_qubit in zip(
-            remaining_logical_qubits, remaining_physical_qubits
+            remaining_logical_sorted, remaining_physical_sorted
         ):
             initial_mapping[logical_qubit] = physical_qubit
 
+        # Validate that the initial mapping respects coupling constraints
+        self._validate_initial_mapping(initial_mapping, first_layer)
+
         return initial_mapping
+
+    def _validate_initial_mapping(
+        self,
+        mapping: dict[quariadne.circuit.LogicalQubit, quariadne.circuit.PhysicalQubit],
+        first_layer: GateLayer,
+    ) -> None:
+        """Validate that initial mapping respects coupling map constraints.
+
+        Checks that for each two-qubit operation in the first layer, the assigned
+        physical qubits form a valid edge in the coupling map.
+
+        Args:
+            mapping: The initial logical-to-physical qubit mapping
+            first_layer: The first gate layer containing operations to validate
+
+        Raises:
+            ValueError: If any operation's physical qubits are not adjacent in
+                the coupling map
+
+        See Also:
+            Qiskit coupling map documentation:
+            https://docs.quantum.ibm.com/api/qiskit/qiskit.transpiler.CouplingMap
+        """
+        for operation in first_layer:
+            left_logical, right_logical = operation.qubits_participating
+            left_physical = mapping[left_logical]
+            right_physical = mapping[right_logical]
+
+            edge = (left_physical, right_physical)
+            reverse_edge = (right_physical, left_physical)
+
+            has_forward_edge = edge in self._edge_to_index
+            has_reverse_edge = reverse_edge in self._edge_to_index
+
+            if not has_forward_edge and not has_reverse_edge:
+                raise ValueError(
+                    f"Initial mapping violates coupling constraint: "
+                    f"operation {operation} maps to physical qubits "
+                    f"{left_physical} and {right_physical}, but neither edge "
+                    f"{edge} nor {reverse_edge} exists in coupling map"
+                )
 
     def get_initial_mapping(
         self,
@@ -984,12 +1061,12 @@ class LpRouterEdges(Router):
             # Aggregate weights per edge across all operations in layer
             layer_execution_weights = np.sum(layer_gate_execution, axis=0)
 
-            # Build bipartite graph and find maximum weight matching
-            bipartite_coupling_map = self._split_coupling_map_to_bipartite(
-                layer_execution_weights
+            # Build bipartite graph with node-to-qubit mapping for correct translation
+            bipartite_coupling_map, node_to_qubit = (
+                self._split_coupling_map_to_bipartite(layer_execution_weights)
             )
 
-            # Extract partitions (used only for biadjacency matrix node ordering)
+            # Extract partitions for biadjacency matrix construction
             in_partition, out_partition = self._extract_bipartite_partitions(
                 bipartite_coupling_map
             )
@@ -1004,9 +1081,13 @@ class LpRouterEdges(Router):
                 )
             )
 
-            # Translate matching to coupling map edge indices
+            # Translate matching to coupling map edge indices using explicit mapping
             matched_edge_indices = self._translate_bipartite_matching_to_edges(
-                row_indices, col_indices
+                row_indices,
+                col_indices,
+                list(out_partition),
+                list(in_partition),
+                node_to_qubit,
             )
 
             # Prune edges to ensure each vertex appears at most once
