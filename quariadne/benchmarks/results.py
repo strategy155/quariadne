@@ -33,8 +33,6 @@ _ALGO_EDGE = "edge"
 _ALGO_QUBIT = "qubit"
 _ALGO_ILP = "ilp"
 _ALGO_SABRE = "sabre"
-_ALGO_BASIC = "basic"
-_ALGO_LOOKAHEAD = "lookahead"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -84,9 +82,7 @@ class BenchmarkResult:
         edge_mapping: Results for LP with edge-based assignment (LpRouterEdges).
         qubit_mapping: Results for LP with Birkhoff decomposition (LpRouterMapping).
         ilp: Results for Integer Linear Programming (IlpRouter).
-        sabre: Results for Qiskit Sabre routing.
-        basic: Results for Qiskit Basic routing.
-        lookahead: Results for Qiskit Lookahead routing.
+        sabre: Results for Qiskit SABRE routing.
     """
 
     circuit: CircuitCharacteristics
@@ -94,8 +90,6 @@ class BenchmarkResult:
     qubit_mapping: AlgorithmResult
     ilp: AlgorithmResult
     sabre: AlgorithmResult
-    basic: AlgorithmResult
-    lookahead: AlgorithmResult
 
     def to_csv_row(self) -> dict[str, str]:
         """Convert benchmark result to CSV row dictionary.
@@ -119,8 +113,6 @@ class BenchmarkResult:
             (_ALGO_QUBIT, self.qubit_mapping),
             (_ALGO_ILP, self.ilp),
             (_ALGO_SABRE, self.sabre),
-            (_ALGO_BASIC, self.basic),
-            (_ALGO_LOOKAHEAD, self.lookahead),
         ]:
             if algo_result.status == AlgorithmStatus.SUCCESS:
                 row[f"{_COL_COUNT}_{algo_name}"] = str(algo_result.gate_count)
@@ -160,8 +152,6 @@ class BenchmarkResult:
             _ALGO_QUBIT,
             _ALGO_ILP,
             _ALGO_SABRE,
-            _ALGO_BASIC,
-            _ALGO_LOOKAHEAD,
         ]:
             headers.extend(
                 [

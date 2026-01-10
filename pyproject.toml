@@ -6,17 +6,18 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "birkhoff",
+    "highspy>=1.9.0",
     "matplotlib>=3.10.3",
     "mypy>=1.16.0",
     "networkx>=3.5",
     "notebook>=7.4.7",
+    "pandas>=2.2.0",
     "pydot>=4.0.1",
     "pylatexenc>=2.10",
     "qiskit>=2.0.1",
     "qiskit-ibm-runtime>=0.40.1",
     "ruff>=0.11.12",
     "scipy",
-    "highspy>=1.9.0",
 ]
 
 [project.entry-points.'qiskit.transpiler.layout']
