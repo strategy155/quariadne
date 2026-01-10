@@ -124,6 +124,115 @@ def to_pattern_matrix(D):
     return result
 
 
+def birkhoff_von_neumann_decomposition_lazy(doubly_stochastic_matrix):
+    """Lazy generator for Birkhoff--von Neumann decomposition.
+
+    Yields (coefficient, permutation_matrix) pairs incrementally as they are
+    extracted from the doubly stochastic matrix. This enables early termination
+    when a suitable permutation is found, avoiding full decomposition.
+
+    The algorithm iteratively extracts permutation matrices by:
+    1. Building a bipartite graph from the non-zero pattern
+    2. Finding a perfect matching (corresponds to a permutation)
+    3. Computing the minimum coefficient along the matching
+    4. Subtracting the scaled permutation from the residual matrix
+
+    Complexity per iteration: O(n^2.5) due to bipartite matching.
+    Maximum iterations: O(n^2) per Johnson, Dulmage & Mendelsohn (1960),
+    specifically t_k <= n^2 - 2n + 2 for dense matrices.
+
+    Args:
+        doubly_stochastic_matrix: Square NumPy array with non-negative entries
+            where row sums and column sums equal 1 (or a constant c).
+
+    Yields:
+        Tuple[float, np.ndarray]: (coefficient, permutation_matrix) pairs where
+            coefficient is the weight in the convex combination and
+            permutation_matrix is an n x n binary matrix with exactly one 1
+            per row and column.
+
+    Raises:
+        ValueError: If input matrix is not square.
+
+    Example:
+        >>> for coef, perm in birkhoff_von_neumann_decomposition_lazy(matrix):
+        ...     if is_compatible(perm):
+        ...         return perm  # Early exit without full decomposition
+
+    References:
+        - Birkhoff, G. (1946). "Tres observaciones sobre el algebra lineal"
+        - Johnson, Dulmage & Mendelsohn (1960). "On an Algorithm of G. Birkhoff
+          Concerning Doubly Stochastic Matrices". Canadian Math. Bulletin.
+    """
+    matrix_rows, matrix_cols = doubly_stochastic_matrix.shape
+
+    if matrix_rows != matrix_cols:
+        raise ValueError(
+            "Input matrix must be square ({} x {})".format(matrix_rows, matrix_cols)
+        )
+
+    matrix_dimension = matrix_rows
+    all_indices = list(
+        itertools.product(range(matrix_dimension), range(matrix_dimension))
+    )
+
+    # Working copy of matrix that we subtract from iteratively
+    residual_matrix = doubly_stochastic_matrix.astype("float")
+
+    while not np.all(residual_matrix == 0):
+        # Step 1: Build bipartite graph from non-zero pattern
+        # Pattern matrix has 1 where residual is non-zero
+        pattern_matrix = to_pattern_matrix(residual_matrix)
+        bipartite_adjacency = to_bipartite_matrix(pattern_matrix)
+        bipartite_graph = from_numpy_array(bipartite_adjacency)
+
+        # Step 2: Find perfect matching in bipartite graph
+        # Left nodes are {0, ..., n-1}, right nodes are {n, ..., 2n-1}
+        left_vertex_set = range(matrix_dimension)
+        matching = maximum_matching(bipartite_graph, left_vertex_set)
+
+        # Handle numerical instability: retry with aggressive rounding
+        expected_matching_size = 2 * matrix_dimension
+        if len(matching) < expected_matching_size:
+            residual_matrix = np.round(residual_matrix, decimals=8)
+            residual_matrix[residual_matrix < TOLERANCE] = 0.0
+
+            # Rebuild graph structures after rounding
+            pattern_matrix = to_pattern_matrix(residual_matrix)
+            bipartite_adjacency = to_bipartite_matrix(pattern_matrix)
+            bipartite_graph = from_numpy_array(bipartite_adjacency)
+            matching = maximum_matching(bipartite_graph, left_vertex_set)
+
+            # If still no perfect matching, decomposition is complete
+            if len(matching) < expected_matching_size:
+                break
+
+        # Step 3: Convert matching to permutation
+        # Matching maps left vertex u to right vertex v; convert v to column index
+        column_for_row = {
+            row: col % matrix_dimension
+            for row, col in matching.items()
+            if row < matrix_dimension
+        }
+        permutation_matrix = to_permutation_matrix(column_for_row)
+
+        # Step 4: Compute coefficient (minimum entry along the permutation)
+        coefficient = min(
+            residual_matrix[row, col]
+            for (row, col) in all_indices
+            if permutation_matrix[row, col] == 1
+        )
+
+        # Yield this permutation before continuing decomposition
+        yield (coefficient, permutation_matrix)
+
+        # Step 5: Subtract scaled permutation from residual
+        residual_matrix -= coefficient * permutation_matrix
+
+        # Clean up numerical noise
+        residual_matrix[np.abs(residual_matrix) < TOLERANCE] = 0.0
+
+
 def birkhoff_von_neumann_decomposition(D):
     """Returns the Birkhoff--von Neumann decomposition of the doubly
     stochastic matrix `D`.

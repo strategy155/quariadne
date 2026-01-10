@@ -84,8 +84,10 @@ def _convert_chain_to_swaps(
         chain: List of (from_physical, to_physical) tuples.
 
     Returns:
-        List of PhysicalSwap objects (duplicates removed via equality).
+        List of PhysicalSwap objects (duplicates removed via set membership).
     """
+    # Use set for O(1) membership check instead of O(n) list membership
+    seen_swaps: set[quariadne.circuit.PhysicalSwap] = set()
     swaps: list[quariadne.circuit.PhysicalSwap] = []
 
     for from_idx, to_idx in chain:
@@ -93,7 +95,8 @@ def _convert_chain_to_swaps(
         physical_to = quariadne.circuit.PhysicalQubit(to_idx)
         swap = quariadne.circuit.PhysicalSwap(physical_from, physical_to)
 
-        if swap not in swaps:
+        if swap not in seen_swaps:
+            seen_swaps.add(swap)
             swaps.append(swap)
 
     return swaps
@@ -128,6 +131,8 @@ def reconstruct_swap_chains_from_mappings(
     References:
         Thesis Algorithm 1: Reconstruction of Optimal Swap Chains By Known Permutations
     """
+    # Use set for O(1) membership check instead of O(n) list membership
+    seen_swaps: set[quariadne.circuit.PhysicalSwap] = set()
     all_swaps: list[quariadne.circuit.PhysicalSwap] = []
 
     for logical_qubit in source_mapping.keys():
@@ -144,7 +149,8 @@ def reconstruct_swap_chains_from_mappings(
         qubit_swaps = _convert_chain_to_swaps(chain)
 
         for swap in qubit_swaps:
-            if swap not in all_swaps:
+            if swap not in seen_swaps:
+                seen_swaps.add(swap)
                 all_swaps.append(swap)
 
     return all_swaps
@@ -528,6 +534,10 @@ class LpRouterMapping(Router):
     ) -> bool:
         """Check if a permutation matrix is compatible with ALL operations in a gate layer.
 
+        Checks if logical qubit pairs in each operation map to adjacent physical
+        qubits in the coupling map. Uses direct edge lookup instead of creating
+        a relabelled graph copy.
+
         Args:
             permutation_matrix: 2D numpy array representing a permutation matrix
             layer: Gate layer containing operations that need to execute in parallel
@@ -535,21 +545,29 @@ class LpRouterMapping(Router):
         Returns:
             True if the permutation allows ALL operations in the layer to be connected, False otherwise.
         """
-        # Create the mapping from physical to logical qubits for this permutation
-        physical_to_logical_mapping = self._create_physical_to_logical_mapping(
-            permutation_matrix
-        )
-        # Relabel the coupling map to get logical connectivity
-        logical_connectivity = nx.relabel_nodes(
-            self.coupling_map, physical_to_logical_mapping
-        )
+        # Build logical->physical mapping directly from permutation matrix
+        # Permutation matrix: physical_idx x logical_idx, entry is 1 where mapped
+        logical_to_physical: dict[int, int] = {}
+        for physical_idx, logical_idx in np.argwhere(permutation_matrix):
+            logical_to_physical[int(logical_idx)] = int(physical_idx)
 
-        # Check if ALL required edges for the layer exist in logical connectivity
-        return all(
-            logical_connectivity.has_edge(left_logical, right_logical)
-            for operation in layer
-            for left_logical, right_logical in [operation.qubits_participating]
-        )
+        # Check each operation's edge requirement directly against coupling map
+        for operation in layer:
+            left_logical, right_logical = operation.qubits_participating
+            left_physical_idx = logical_to_physical[left_logical.index]
+            right_physical_idx = logical_to_physical[right_logical.index]
+
+            left_physical = quariadne.circuit.PhysicalQubit(left_physical_idx)
+            right_physical = quariadne.circuit.PhysicalQubit(right_physical_idx)
+
+            # Check if edge exists in either direction (coupling map is directed)
+            has_edge = self.coupling_map.has_edge(
+                left_physical, right_physical
+            ) or self.coupling_map.has_edge(right_physical, left_physical)
+            if not has_edge:
+                return False
+
+        return True
 
     def _build_mapping_from_permutation(
         self, permutation_matrix: np.ndarray
@@ -571,9 +589,12 @@ class LpRouterMapping(Router):
     ) -> np.ndarray:
         """Extract permutation matrix for a gate layer using Birkhoff decomposition.
 
-        Uses Birkhoff-von Neumann decomposition to convert doubly stochastic matrix to
-        permutations and selects the first permutation that satisfies connectivity
-        requirements for ALL operations in the layer.
+        Uses Birkhoff-von Neumann decomposition to convert doubly stochastic matrix
+        to permutations, sorts by coefficient (highest first), and selects the first
+        permutation that satisfies connectivity requirements for ALL operations.
+
+        This ensures quality by always selecting the highest-coefficient compatible
+        permutation from the full decomposition.
 
         Args:
             mapping_variables: 2D numpy array representing doubly stochastic mapping matrix
@@ -585,22 +606,21 @@ class LpRouterMapping(Router):
         Raises:
             ValueError: If no compatible permutation found for the layer.
         """
-        # Perform Birkhoff-von Neumann decomposition
+        # Perform full Birkhoff-von Neumann decomposition
         coefficient_matrix_pairs = birkhoff_von_neumann_decomposition(mapping_variables)
 
-        # Sort permutations by coefficient in descending order
+        # Sort permutations by coefficient in descending order to prefer higher-weight ones
         sorted_permutations = sorted(
             coefficient_matrix_pairs,
-            key=lambda coefficient_matrix_pair: coefficient_matrix_pair[0],
+            key=lambda pair: pair[0],
             reverse=True,
         )
 
-        # Find the first permutation that satisfies connectivity requirements for ALL operations in layer
+        # Find the first (highest coefficient) compatible permutation
         for coefficient, permutation_matrix in sorted_permutations:
             if self._is_layer_compatible_with_permutation(permutation_matrix, layer):
                 return permutation_matrix
 
-        # If no compatible permutation found, raise an error
         raise ValueError(f"No compatible permutation found for layer {layer}")
 
     def _mapping_to_permutation_matrix(
@@ -676,50 +696,55 @@ class LpRouterMapping(Router):
         return swaps
 
     def _run(self) -> None:
-        """Run the iterative LP routing process to generate sequence of mappings and swaps.
+        """Run the LP routing process to generate sequence of mappings and swaps.
 
-        Implements the iterative routing algorithm:
-        1. Bootstrap: get initial permutation using LP and Birkhoff decomposition for first layer
-        2. Iterate through gate layers:
-           - Run LP on remaining layers to get next permutation
-           - Calculate swaps between previous and current permutation
-           - Pop the processed layer
+        Implements an optimised single-LP algorithm:
+        1. Run single LP on all layers with continuous variables
+        2. Extract permutations at each layer timestep using Birkhoff decomposition
+        3. Run pairwise LP for swap recovery between consecutive permutations
+
+        This reduces LP solves from 3L-2 to L (where L = layer count).
+        Reference: Optimisation based on LpRouterEdges pattern.
         """
-        # Make a working copy of layers list
-        remaining_layers = self.gate_layers.copy()
+        # Phase 1: Single LP on all layers
+        lp_router = MilpScipyRouter(
+            coupling_map=self.coupling_map,
+            gate_layers=self.gate_layers,
+            qubits=self.qubits,
+            integrality=CONTINUOUS_VARIABLE_INTEGRALITY,
+            fixed_mapping=None,
+        )
+        lp_result = lp_router.run()
 
-        # Bootstrap phase: get initial permutation
-        current_permutation = self._get_initial_permutation()
-        initial_mapping = self._build_mapping_from_permutation(current_permutation)
-        self.mappings = [initial_mapping]
-        self.permutations = [current_permutation]
-        # Iterative phase: process layers one by one
+        # Phase 2: Extract all permutations from single LP result
+        # Each layer's mapping is at timestep = layer_index * worst_spacing
+        self.permutations = []
+        self.mappings = []
+        for layer_index in range(self.layer_count):
+            timestep = layer_index * lp_result.worst_spacing
+            mapping_variables = lp_result.mapping_variables[timestep]
+            layer = self.gate_layers[layer_index]
+
+            permutation = self._extract_permutation_for_layer(mapping_variables, layer)
+            mapping = self._build_mapping_from_permutation(permutation)
+
+            self.permutations.append(permutation)
+            self.mappings.append(mapping)
+
+        # Phase 3: Pairwise swap recovery (L-1 LP solves)
         for layer_index in range(1, self.layer_count):
-            routed_layer = self.gate_layers[layer_index]
+            previous_permutation = self.permutations[layer_index - 1]
+            current_permutation = self.permutations[layer_index]
             previous_layer = self.gate_layers[layer_index - 1]
-            previous_permutation = current_permutation
-            # Get next permutation for this layer
-            next_permutation = self._get_next_permutation(
-                current_permutation, routed_layer, remaining_layers
-            )
-            next_mapping = self._build_mapping_from_permutation(next_permutation)
+            current_layer = self.gate_layers[layer_index]
 
-            # Calculate swaps between previous and next permutation
             swaps = self._get_swaps_between_two_permutations(
                 previous_permutation,
-                next_permutation,
+                current_permutation,
                 previous_layer,
-                routed_layer,
+                current_layer,
             )
             self.swaps_by_operation[layer_index] = swaps
-
-            # Update current permutation and add mapping to list
-            self.mappings.append(next_mapping)
-            self.permutations.append(next_permutation)
-            current_permutation = next_permutation
-
-            # Pop the first layer from remaining layers
-            remaining_layers.pop(0)
 
     def get_initial_mapping(
         self,
