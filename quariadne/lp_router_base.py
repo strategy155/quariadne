@@ -102,7 +102,7 @@ class LPSolverOptions:
 
     output_flag: bool = False
     log_to_console: bool = False
-    solver: str = quariadne.benchmarks.constants.HIPO_SOLVER_NAME
+    solver: str = "simplex"  # HiPO fails on rank-deficient constraint matrices
     hipo_system_solver: str = quariadne.benchmarks.constants.HIPO_SYSTEM_SOLVER
     threads: int = quariadne.benchmarks.constants.HIPO_DEFAULT_THREADS
 
