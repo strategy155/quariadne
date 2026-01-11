@@ -216,26 +216,27 @@ class ComputationalDAG:
         Returns:
             ComputationalDAG: The converted routing circuit representation.
         """
-        # obtaining generators for nodes and edges
-        random_dag_nodes = qiskit_dag.nodes()
-        random_dag_edges = qiskit_dag.edges()
-
-        # preparing the arrays for nodes and transitions, then iterating through the corresponding qiskit generators
-        # and filling the helper arrays
+        # Build node lookup table to ensure edges reference the same node objects.
+        # Without this, _convert_qiskit_dag_edge would create duplicate nodes.
+        qiskit_node_to_quariadne: dict = {}
         circuit_nodes = []
+
+        for qiskit_node in qiskit_dag.nodes():
+            quariadne_node = cls._convert_qiskit_dag_node(qiskit_node)
+            qiskit_node_to_quariadne[qiskit_node] = quariadne_node
+            circuit_nodes.append(quariadne_node)
+
+        # Create transitions using the lookup table to reuse node objects
         circuit_transitions = []
-        for node in random_dag_nodes:
-            circuit_node = cls._convert_qiskit_dag_node(node)
-            circuit_nodes.append(circuit_node)
-
-        for edge in random_dag_edges:
-            circuit_transition = cls._convert_qiskit_dag_edge(edge)
-            circuit_transitions.append(circuit_transition)
-
-        # forming a resulting routing representation
+        for in_node, out_node, wire in qiskit_dag.edges():
+            wire_index = wire._index
+            underlying_qubit = quariadne.circuit.LogicalQubit(wire_index)
+            quariadne_in = qiskit_node_to_quariadne[in_node]
+            quariadne_out = qiskit_node_to_quariadne[out_node]
+            transition = Transition(quariadne_in, quariadne_out, underlying_qubit)
+            circuit_transitions.append(transition)
 
         routing_circuit = cls(circuit_nodes, circuit_transitions)
-
         return routing_circuit
 
     def to_nx(self):

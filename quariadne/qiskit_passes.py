@@ -635,12 +635,90 @@ class BipartiteRouting(qiskit.transpiler.TransformationPass):
 
         return updated_layout
 
+    def _compute_swaps_for_edge(
+        self,
+        current_layout: qiskit.transpiler.Layout,
+        q0_phys: int,
+        q1_phys: int,
+        required_left: int,
+        required_right: int,
+    ) -> List[quariadne.circuit.PhysicalSwap]:
+        """Compute swaps to move qubits to required edge positions.
+
+        Uses iterative approach: move each qubit to its required position,
+        re-checking after each move since swaps can displace the other qubit.
+
+        Args:
+            current_layout: Current layout state.
+            q0_phys: Current physical position of left qubit.
+            q1_phys: Current physical position of right qubit.
+            required_left: Required position for left qubit.
+            required_right: Required position for right qubit.
+
+        Returns:
+            List of PhysicalSwap operations.
+        """
+        import networkx as nx
+
+        swaps: List[quariadne.circuit.PhysicalSwap] = []
+
+        # Build graph for shortest path computation
+        graph = nx.Graph()
+        graph.add_edges_from(self.coupling_map.get_edges())
+
+        # Track positions (will be modified by swaps)
+        pos_left = q0_phys
+        pos_right = q1_phys
+
+        # Iterate until both qubits are in position
+        for _ in range(20):  # Safety limit
+            if pos_left == required_left and pos_right == required_right:
+                break
+
+            # Move left qubit if needed
+            if pos_left != required_left:
+                try:
+                    path = nx.shortest_path(graph, pos_left, required_left)
+                    for i in range(len(path) - 1):
+                        swaps.append(
+                            quariadne.circuit.PhysicalSwap(
+                                quariadne.circuit.PhysicalQubit(path[i]),
+                                quariadne.circuit.PhysicalQubit(path[i + 1]),
+                            )
+                        )
+                        # Update tracked positions
+                        if pos_right == path[i + 1]:
+                            pos_right = path[i]
+                        pos_left = path[i + 1]
+                except nx.NetworkXNoPath:
+                    break
+
+            # Move right qubit if needed
+            if pos_right != required_right:
+                try:
+                    path = nx.shortest_path(graph, pos_right, required_right)
+                    for i in range(len(path) - 1):
+                        swaps.append(
+                            quariadne.circuit.PhysicalSwap(
+                                quariadne.circuit.PhysicalQubit(path[i]),
+                                quariadne.circuit.PhysicalQubit(path[i + 1]),
+                            )
+                        )
+                        # Update tracked positions
+                        if pos_left == path[i + 1]:
+                            pos_left = path[i]
+                        pos_right = path[i + 1]
+                except nx.NetworkXNoPath:
+                    break
+
+        return swaps
+
     def run(self, dag: qiskit.dagcircuit.DAGCircuit) -> qiskit.dagcircuit.DAGCircuit:
         """Apply bipartite LP-determined SWAP operations to the DAG.
 
-        Follows the pattern from MilpRouting.run(): iterates through layers,
-        inserts SWAPs before two-qubit operations as needed, and maintains
-        layout state throughout.
+        Computes swaps on-the-fly based on the required edge for each gate
+        and the current layout state. This is more robust than using precomputed
+        swaps since it always uses the actual current mapping.
         """
         new_dag = dag.copy_empty_like()
 
@@ -667,7 +745,7 @@ class BipartiteRouting(qiskit.transpiler.TransformationPass):
 
         canonical_register = dag.qregs["q"]
         bipartite_result = self.property_set["bipartite_result"]
-        swap_pairs_by_operation = bipartite_result.inserted_swaps
+        edge_by_qubits = bipartite_result.operation_to_edge_by_qubits
 
         # Initialise layout tracking (trivial after embedding)
         trivial_layout = qiskit.transpiler.Layout.generate_trivial_layout(
@@ -675,28 +753,61 @@ class BipartiteRouting(qiskit.transpiler.TransformationPass):
         )
         current_layout = trivial_layout.copy()
 
-        # Track two-qubit operation index for swap lookup
-        two_qubit_operation_idx = 0
+        # Track qubit pair occurrence counts for operation matching
+        qubit_pair_counts: Dict[tuple, int] = {}
 
-        # Process each layer and insert SWAPs as determined by LP
+        # Process each layer
         for layer in dag.serial_layers():
             subdag = layer["graph"]
 
-            # Check for SWAPs before each two-qubit gate
             for gate in subdag.two_qubit_ops():
-                if two_qubit_operation_idx in swap_pairs_by_operation:
-                    swaps = swap_pairs_by_operation[two_qubit_operation_idx]
-                    # Create and insert SWAP operations
-                    swap_dag = self._create_swap_dag(
-                        canonical_register, current_layout, swaps
+                # Physical qubit indices from the embedded DAG
+                q0_phys = gate.qargs[0]._index
+                q1_phys = gate.qargs[1]._index
+                qubit_pair_key = (q0_phys, q1_phys)
+
+                occurrence = qubit_pair_counts.get(qubit_pair_key, 0)
+                qubit_pair_counts[qubit_pair_key] = occurrence + 1
+                full_key = (q0_phys, q1_phys, occurrence)
+
+                # Get required edge from LP result
+                if full_key in edge_by_qubits:
+                    required_edge = edge_by_qubits[full_key]
+                    required_left = required_edge[0].index
+                    required_right = required_edge[1].index
+
+                    # Current positions: look up in current_layout since swaps
+                    # may have moved qubits from their embedded positions.
+                    # gate.qargs[i] is a Qubit object; current_layout maps it
+                    # to its current physical position.
+                    current_left = current_layout[gate.qargs[0]]
+                    current_right = current_layout[gate.qargs[1]]
+
+                    # Check if gate is already on the required edge
+                    on_required_edge = (
+                        current_left == required_left
+                        and current_right == required_right
+                    ) or (
+                        current_left == required_right
+                        and current_right == required_left
                     )
-                    qubit_order = current_layout.reorder_bits(new_dag.qubits)
-                    new_dag.compose(swap_dag, qubits=qubit_order)
-
-                    # Update layout state after SWAPs
-                    current_layout = self._apply_swaps_to_layout(current_layout, swaps)
-
-                two_qubit_operation_idx += 1
+                    if not on_required_edge:
+                        swaps = self._compute_swaps_for_edge(
+                            current_layout,
+                            current_left,
+                            current_right,
+                            required_left,
+                            required_right,
+                        )
+                        if swaps:
+                            swap_dag = self._create_swap_dag(
+                                canonical_register, current_layout, swaps
+                            )
+                            qubit_order = current_layout.reorder_bits(new_dag.qubits)
+                            new_dag.compose(swap_dag, qubits=qubit_order)
+                            current_layout = self._apply_swaps_to_layout(
+                                current_layout, swaps
+                            )
 
             # Add the entire layer using current layout
             qubit_order = current_layout.reorder_bits(new_dag.qubits)

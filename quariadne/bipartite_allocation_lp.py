@@ -76,7 +76,6 @@ import copy
 import functools
 import logging
 import time
-from collections import defaultdict
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING
@@ -149,6 +148,22 @@ VARIABLE_COUNT = "count"
 VARIABLE_OFFSET = "offset"
 
 
+def _get_default_lp_solver() -> str:
+    """Get default LP solver, checking environment override.
+
+    Returns "simplex" by default since HiPO has issues with rank-deficient
+    constraint matrices from edge exclusivity constraints. Users can override
+    with QUARIADNE_LP_SOLVER environment variable if they have a working
+    HiPO setup.
+
+    Returns:
+        Solver name ("simplex" or "hipo").
+    """
+    import os
+
+    return os.environ.get("QUARIADNE_LP_SOLVER", "simplex")
+
+
 @dataclass
 class BipartiteLPSolverOptions:
     """Configuration options for HiGHS LP solver in bipartite allocation.
@@ -159,7 +174,9 @@ class BipartiteLPSolverOptions:
     Attributes:
         output_flag: Whether to display solver output. Defaults to False.
         log_to_console: Whether to log to console. Defaults to False.
-        solver: LP solver algorithm name. Uses HiPO with PARDISO by default.
+        solver: LP solver algorithm. Defaults to simplex; override with
+            QUARIADNE_LP_SOLVER env var. HiPO has issues with rank-deficient
+            constraint matrices from edge exclusivity constraints.
         hipo_system_solver: System solver for HiPO. Uses PARDISO by default.
         threads: Number of threads for parallel solving.
 
@@ -169,7 +186,7 @@ class BipartiteLPSolverOptions:
 
     output_flag: bool = False
     log_to_console: bool = False
-    solver: str = quariadne.benchmarks.constants.HIPO_SOLVER_NAME
+    solver: str = field(default_factory=_get_default_lp_solver)
     hipo_system_solver: str = quariadne.benchmarks.constants.HIPO_SYSTEM_SOLVER
     threads: int = quariadne.benchmarks.constants.HIPO_DEFAULT_THREADS
 
@@ -283,6 +300,11 @@ class BipartiteAllocationResult:
         operations: List of operations in LP order for reference.
         inserted_swaps: Dict mapping two-qubit operation index to list of PhysicalSwap
             objects. Swaps for operation i should be inserted before that operation.
+        inserted_swaps_by_qubits: Dict mapping (qubit1_idx, qubit2_idx, occurrence) to
+            list of PhysicalSwap objects. Provides order-independent swap lookup that
+            matches operations by their participating qubits and occurrence count.
+            This is the preferred lookup method for BipartiteRouting to avoid
+            ordering mismatches between LP and DAG iteration orders.
     """
 
     objective_value: float
@@ -299,6 +321,9 @@ class BipartiteAllocationResult:
     final_mapping: dict[quariadne.circuit.LogicalQubit, quariadne.circuit.PhysicalQubit]
     operations: list[quariadne.circuit.QuantumOperation]
     inserted_swaps: dict[int, list[quariadne.circuit.PhysicalSwap]]
+    inserted_swaps_by_qubits: dict[
+        tuple[int, int, int], list[quariadne.circuit.PhysicalSwap]
+    ]
 
 
 def get_coupling_graph(coupling_map: qiskit.transpiler.CouplingMap) -> nx.DiGraph:
@@ -712,6 +737,14 @@ class BipartiteAllocationRouter:
         )
         highs_model.setOptionValue("threads", solver_options.threads)
 
+        # Disable presolve for HiPO due to rank-deficient constraint matrix.
+        # Edge exclusivity constraints have linear dependencies with operation
+        # uniqueness (sum over positions = 2 * sum over operations in layer).
+        # This causes Eigen's PardisoLDLT to fail on the singular KKT matrix.
+        # TODO(quariadne): Fix edge exclusivity formulation to be full-rank.
+        if solver_options.solver == "hipo":
+            highs_model.setOptionValue("presolve", "off")
+
         # Add all variables
         self._add_variables(highs_model)
 
@@ -871,10 +904,19 @@ class BipartiteAllocationRouter:
 
         For each transition (qubit l, from_op o', to_op o):
             - Outflow from o': Σ_e z^l_{o, e', e} = y_{o', e'} for each e'
-            - Inflow to o: Σ_{e'} z^l_{o, e', e} = y_{o, e} for each e
 
-        Uses batch HiGHS API for performance - builds CSR matrix and adds all rows
-        in one call instead of individual addRow() calls.
+        Note: Inflow constraints (Σ_{e'} z^l_{o, e', e} = y_{o, e}) are omitted.
+        Adding inflow breaks the total unimodularity of the constraint matrix,
+        causing fractional LP solutions. Without inflow, y-values are integral.
+
+        Warning: The current formulation has a known limitation - z-flows are
+        not constrained to match target operation y-values. The LP objective
+        (total distance) can be zero even when routing requires swaps. The
+        swap extraction uses y-argmax which may not reflect the LP's optimal
+        z-flow paths. Consider using SABRE for production routing.
+
+        Uses batch HiGHS API for performance - builds CSR matrix and adds all
+        rows in one call instead of individual addRow() calls.
 
         Args:
             highs_model: HiGHS model instance
@@ -883,7 +925,7 @@ class BipartiteAllocationRouter:
             - HiGHS Python API: https://ergo-code.github.io/HiGHS/dev/interfaces/python/
         """
         num_transitions = len(self.flow_transitions)
-        num_constraints = num_transitions * 2 * self.edge_count
+        num_constraints = num_transitions * self.edge_count  # Outflow only
         nonzeros_per_constraint = self.edge_count + 1
         total_nonzeros = num_constraints * nonzeros_per_constraint
 
@@ -903,9 +945,8 @@ class BipartiteAllocationRouter:
 
         for transition_index, transition in enumerate(self.flow_transitions):
             from_operation_index = transition.from_operation_index
-            to_operation_index = transition.to_operation_index
 
-            # Outflow constraints
+            # Outflow constraints only
             for from_edge_index in range(self.edge_count):
                 row_starts[row_index] = nonzero_index
 
@@ -919,26 +960,6 @@ class BipartiteAllocationRouter:
 
                 y_variable_index = self._get_y_var_index(
                     from_operation_index, from_edge_index
-                )
-                col_indices[nonzero_index] = y_variable_index
-                values[nonzero_index] = COEFFICIENT_NEGATIVE
-                nonzero_index += 1
-                row_index += 1
-
-            # Inflow constraints
-            for to_edge_index in range(self.edge_count):
-                row_starts[row_index] = nonzero_index
-
-                for from_edge_index in range(self.edge_count):
-                    z_variable_index = self._get_z_var_index(
-                        transition_index, from_edge_index, to_edge_index
-                    )
-                    col_indices[nonzero_index] = z_variable_index
-                    values[nonzero_index] = COEFFICIENT_POSITIVE
-                    nonzero_index += 1
-
-                y_variable_index = self._get_y_var_index(
-                    to_operation_index, to_edge_index
                 )
                 col_indices[nonzero_index] = y_variable_index
                 values[nonzero_index] = COEFFICIENT_NEGATIVE
@@ -1080,105 +1101,102 @@ class BipartiteAllocationRouter:
         source_edge_index, target_edge_index = divmod(best_flat_index, self.edge_count)
         return int(source_edge_index), int(target_edge_index)
 
-    def _extract_swaps_from_z_variables(
+    def _extract_swaps_from_edge_assignments(
         self,
-        col_values: list[float],
         operation_edge_assignment: dict[
             int, tuple[quariadne.circuit.PhysicalQubit, quariadne.circuit.PhysicalQubit]
         ],
+        initial_mapping: dict[
+            quariadne.circuit.LogicalQubit, quariadne.circuit.PhysicalQubit
+        ],
     ) -> dict[int, list[quariadne.circuit.PhysicalSwap]]:
-        """Extract swap sequence from z flow variables.
+        """Extract swap sequence by iteratively moving qubits to required positions.
 
-        Analyses z^l_{o,e',e} flow variables to determine qubit movements between
-        consecutive operations. For each transition, selects the (e', e) pair with
-        maximum z value (robust to fractional LP solutions), then generates SWAP
-        operations along the shortest path between positions.
-
-        Swaps are keyed by the target operation index (the operation BEFORE which
-        the swaps should be inserted), matching MilpRouterResult.inserted_swaps.
+        Processes operations in order, tracking the running mapping. For each
+        operation, moves qubits one at a time to their required positions on the
+        assigned edge, updating the mapping after each swap.
 
         Args:
-            col_values: Solution variable values from the LP solver.
             operation_edge_assignment: Mapping from operation index to assigned edge.
+            initial_mapping: Initial logical-to-physical qubit mapping.
 
         Returns:
             Dictionary mapping operation index to list of PhysicalSwap objects.
-
-        Raises:
-            RuntimeError: If no path exists between two physical qubit positions.
         """
-        inserted_swaps: dict[int, list[quariadne.circuit.PhysicalSwap]] = defaultdict(
-            list
-        )
+        inserted_swaps: dict[int, list[quariadne.circuit.PhysicalSwap]] = {}
 
-        # Get cached shortest paths using the same edge set used for distance computation
+        # Cached shortest paths
         coupling_edges = frozenset(
             (edge[0].index, edge[1].index) for edge in self.coupling_map.edges()
         )
         cached_paths = _compute_all_pairs_shortest_paths(coupling_edges)
 
-        # Process each flow transition to extract swaps
-        for transition_index, transition in enumerate(self.flow_transitions):
-            source_operation = transition.from_operation_index
-            target_operation = transition.to_operation_index
-            logical_qubit = transition.qubit
+        # Running mapping: logical -> physical position index
+        current_mapping = {
+            log_q: phys_q.index for log_q, phys_q in initial_mapping.items()
+        }
+        # Reverse mapping: physical position -> logical qubit (None if position empty)
+        position_to_qubit: dict[int, quariadne.circuit.LogicalQubit | None] = {
+            phys_q.index: log_q for log_q, phys_q in initial_mapping.items()
+        }
 
-            # Find the edge pair with maximum z value for this transition
-            source_edge_index, target_edge_index = (
-                self._find_best_edge_pair_for_transition(transition_index, col_values)
-            )
+        def apply_swap(pos_a: int, pos_b: int) -> None:
+            """Apply a swap and update both mappings."""
+            qubit_a = position_to_qubit.get(pos_a)
+            qubit_b = position_to_qubit.get(pos_b)
+            if qubit_a is not None:
+                current_mapping[qubit_a] = pos_b
+            if qubit_b is not None:
+                current_mapping[qubit_b] = pos_a
+            position_to_qubit[pos_a] = qubit_b
+            position_to_qubit[pos_b] = qubit_a
 
-            # Get the actual edges from indices
-            source_edge = self.edges[source_edge_index]
-            target_edge = self.edges[target_edge_index]
+        # Process each operation in order
+        for op_idx in range(self.operation_count):
+            operation = self.operations[op_idx]
+            edge = operation_edge_assignment[op_idx]
+            left_qubit, right_qubit = operation.qubits_participating
+            required_left = edge[0].index
+            required_right = edge[1].index
 
-            # Determine where the qubit sits at source and target operations
-            source_physical_position = self._get_qubit_position_in_edge(
-                logical_qubit, source_operation, source_edge
-            )
-            target_physical_position = self._get_qubit_position_in_edge(
-                logical_qubit, target_operation, target_edge
-            )
+            op_swaps: list[quariadne.circuit.PhysicalSwap] = []
 
-            # If positions differ, generate swap path
-            if source_physical_position != target_physical_position:
-                path_key = (
-                    source_physical_position.index,
-                    target_physical_position.index,
-                )
+            # Iterate until both qubits are in position (moving one can displace the other)
+            max_iterations = 10  # Safety limit
+            for _ in range(max_iterations):
+                left_ok = current_mapping[left_qubit] == required_left
+                right_ok = current_mapping[right_qubit] == required_right
+                if left_ok and right_ok:
+                    break
 
-                # Verify path exists in cached paths
-                if path_key not in cached_paths:
-                    raise RuntimeError(
-                        f"No path found between physical qubits "
-                        f"{source_physical_position} and {target_physical_position}."
-                    )
+                # Move left qubit if needed
+                current_left = current_mapping[left_qubit]
+                if current_left != required_left:
+                    path = cached_paths.get((current_left, required_left), [])
+                    for i in range(len(path) - 1):
+                        swap = quariadne.circuit.PhysicalSwap(
+                            quariadne.circuit.PhysicalQubit(path[i]),
+                            quariadne.circuit.PhysicalQubit(path[i + 1]),
+                        )
+                        op_swaps.append(swap)
+                        apply_swap(path[i], path[i + 1])
 
-                # Get path as list of node indices and generate SWAPs
-                swap_path_indices = cached_paths[path_key]
-                swap_path_length = len(swap_path_indices)
+                # Move right qubit if needed
+                current_right = current_mapping[right_qubit]
+                if current_right != required_right:
+                    path = cached_paths.get((current_right, required_right), [])
+                    for i in range(len(path) - 1):
+                        swap = quariadne.circuit.PhysicalSwap(
+                            quariadne.circuit.PhysicalQubit(path[i]),
+                            quariadne.circuit.PhysicalQubit(path[i + 1]),
+                        )
+                        op_swaps.append(swap)
+                        apply_swap(path[i], path[i + 1])
 
-                for path_step_index in range(swap_path_length - 1):
-                    current_qubit_index = swap_path_indices[path_step_index]
-                    next_qubit_index = swap_path_indices[path_step_index + 1]
+            if op_swaps:
+                inserted_swaps[op_idx] = op_swaps
 
-                    current_physical_qubit = quariadne.circuit.PhysicalQubit(
-                        current_qubit_index
-                    )
-                    next_physical_qubit = quariadne.circuit.PhysicalQubit(
-                        next_qubit_index
-                    )
-
-                    swap = quariadne.circuit.PhysicalSwap(
-                        current_physical_qubit, next_physical_qubit
-                    )
-
-                    # Add swap if not already present (avoid duplicates)
-                    current_operation_swaps = inserted_swaps[target_operation]
-                    if swap not in current_operation_swaps:
-                        current_operation_swaps.append(swap)
-
-        return dict(inserted_swaps)
+        return inserted_swaps
 
     def _extract_solution(
         self, highs_model: highspy.Highs
@@ -1213,8 +1231,13 @@ class BipartiteAllocationRouter:
             for operation_index in range(self.operation_count)
         }
 
-        # Build operation_to_edge_by_qubits for lookup by qubit pair
-        # Key: (left_qubit_index, right_qubit_index, occurrence_count)
+        # Derive initial mapping using bipartite matching for unique positions
+        initial_mapping = self._derive_initial_mapping(operation_edge_assignment)
+
+        # Build operation_to_edge_by_qubits for lookup by qubit pair.
+        # Keys use PHYSICAL qubit indices (via initial_mapping) because the
+        # BipartiteRouting pass operates on the embedded DAG where gate.qargs
+        # contain physical qubits. Using logical indices would cause mismatch.
         operation_to_edge_by_qubits: dict[
             tuple[int, int, int],
             tuple[quariadne.circuit.PhysicalQubit, quariadne.circuit.PhysicalQubit],
@@ -1224,27 +1247,53 @@ class BipartiteAllocationRouter:
         for operation_index in range(self.operation_count):
             operation = self.operations[operation_index]
             left_qubit, right_qubit = operation.qubits_participating
-            qubit_pair_key = (left_qubit.index, right_qubit.index)
+
+            # Convert logical qubit indices to physical using initial_mapping
+            left_physical = initial_mapping[left_qubit].index
+            right_physical = initial_mapping[right_qubit].index
+            qubit_pair_key = (left_physical, right_physical)
 
             occurrence = qubit_pair_counts.get(qubit_pair_key, 0)
             qubit_pair_counts[qubit_pair_key] = occurrence + 1
 
-            full_key = (left_qubit.index, right_qubit.index, occurrence)
+            full_key = (left_physical, right_physical, occurrence)
             if operation_index in operation_edge_assignment:
                 operation_to_edge_by_qubits[full_key] = operation_edge_assignment[
                     operation_index
                 ]
 
-        # Derive initial mapping using bipartite matching for unique positions
-        initial_mapping = self._derive_initial_mapping(operation_edge_assignment)
-
         # Extract final mapping for windowed solving
         final_mapping = self._extract_final_mapping(operation_edge_assignment)
 
-        # Extract swaps from z flow variables
-        inserted_swaps = self._extract_swaps_from_z_variables(
-            col_values, operation_edge_assignment
+        # Extract swaps by iteratively moving qubits to required positions
+        inserted_swaps = self._extract_swaps_from_edge_assignments(
+            operation_edge_assignment, initial_mapping
         )
+
+        # Build inserted_swaps_by_qubits for order-independent swap lookup.
+        # Keys use PHYSICAL qubit indices (via initial_mapping) because the
+        # BipartiteRouting pass operates on the embedded DAG where gate.qargs
+        # contain physical qubits. Using logical indices would cause mismatch.
+        inserted_swaps_by_qubits: dict[
+            tuple[int, int, int], list[quariadne.circuit.PhysicalSwap]
+        ] = {}
+        swap_qubit_pair_counts: dict[tuple[int, int], int] = {}
+
+        for operation_index in range(self.operation_count):
+            operation = self.operations[operation_index]
+            left_qubit, right_qubit = operation.qubits_participating
+
+            # Convert logical qubit indices to physical using initial_mapping
+            left_physical = initial_mapping[left_qubit].index
+            right_physical = initial_mapping[right_qubit].index
+            qubit_pair_key = (left_physical, right_physical)
+
+            occurrence = swap_qubit_pair_counts.get(qubit_pair_key, 0)
+            swap_qubit_pair_counts[qubit_pair_key] = occurrence + 1
+
+            full_key = (left_physical, right_physical, occurrence)
+            if operation_index in inserted_swaps:
+                inserted_swaps_by_qubits[full_key] = inserted_swaps[operation_index]
 
         return BipartiteAllocationResult(
             objective_value=objective_value,
@@ -1254,6 +1303,7 @@ class BipartiteAllocationRouter:
             final_mapping=final_mapping,
             operations=list(self.operations),
             inserted_swaps=inserted_swaps,
+            inserted_swaps_by_qubits=inserted_swaps_by_qubits,
         )
 
     def _derive_initial_mapping(
@@ -1376,8 +1426,13 @@ class BipartiteAllocationRouter:
 
         return final_mapping
 
-    def run(self) -> BipartiteAllocationResult:
+    def run(
+        self, solver_options: BipartiteLPSolverOptions | None = None
+    ) -> BipartiteAllocationResult:
         """Run the bipartite allocation LP optimisation.
+
+        Args:
+            solver_options: Optional solver configuration. Uses defaults if None.
 
         Returns:
             BipartiteAllocationResult containing the optimal solution
@@ -1396,11 +1451,12 @@ class BipartiteAllocationRouter:
                 final_mapping=trivial_mapping,
                 operations=[],
                 inserted_swaps={},
+                inserted_swaps_by_qubits={},
             )
 
         # Build and solve the model
         t0 = time.perf_counter()
-        highs_model = self._build_model()
+        highs_model = self._build_model(solver_options)
         t1 = time.perf_counter()
         _logger.info(
             "Model built: %d vars, %d constraints in %.2fs",
@@ -1709,10 +1765,14 @@ class WindowedBipartiteRouter(BipartiteAllocationRouter):
         Returns:
             Complete BipartiteAllocationResult for the entire circuit.
         """
-        # Build operation_to_edge_by_qubits lookup table
+        # Build operation_to_edge_by_qubits and inserted_swaps_by_qubits lookup tables.
+        # Both use the same (qubit1_idx, qubit2_idx, occurrence) key pattern.
         operation_to_edge_by_qubits: dict[
             tuple[int, int, int],
             tuple[quariadne.circuit.PhysicalQubit, quariadne.circuit.PhysicalQubit],
+        ] = {}
+        inserted_swaps_by_qubits: dict[
+            tuple[int, int, int], list[quariadne.circuit.PhysicalSwap]
         ] = {}
         qubit_pair_occurrence_counts: dict[tuple[int, int], int] = {}
 
@@ -1724,12 +1784,17 @@ class WindowedBipartiteRouter(BipartiteAllocationRouter):
             occurrence = qubit_pair_occurrence_counts.get(qubit_pair_key, 0)
             qubit_pair_occurrence_counts[qubit_pair_key] = occurrence + 1
 
+            full_key = (qubit_left.index, qubit_right.index, occurrence)
+
             # Store edge assignment with (qubit1, qubit2, occurrence) key
             if operation_index in accumulated_edge_assignments:
-                full_key = (qubit_left.index, qubit_right.index, occurrence)
                 operation_to_edge_by_qubits[full_key] = accumulated_edge_assignments[
                     operation_index
                 ]
+
+            # Store swap assignment with (qubit1, qubit2, occurrence) key
+            if operation_index in accumulated_swaps:
+                inserted_swaps_by_qubits[full_key] = accumulated_swaps[operation_index]
 
         # Build final mapping from last operations of each qubit
         final_mapping: dict[
@@ -1758,14 +1823,20 @@ class WindowedBipartiteRouter(BipartiteAllocationRouter):
             final_mapping=final_mapping,
             operations=list(self.operations),
             inserted_swaps=accumulated_swaps,
+            inserted_swaps_by_qubits=inserted_swaps_by_qubits,
         )
 
-    def run(self) -> BipartiteAllocationResult:
+    def run(
+        self, solver_options: BipartiteLPSolverOptions | None = None
+    ) -> BipartiteAllocationResult:
         """Run windowed bipartite allocation optimisation.
 
         Overrides the parent run() method to solve large circuits in overlapping
         windows. For small circuits (fewer layers than window_size), delegates
         to the parent's single-solve approach.
+
+        Args:
+            solver_options: Optional solver configuration. Uses defaults if None.
 
         Returns:
             BipartiteAllocationResult containing the merged solution from all windows.
@@ -1774,7 +1845,7 @@ class WindowedBipartiteRouter(BipartiteAllocationRouter):
         num_layers = len(self.operation_layers)
         if num_layers <= self.window_size:
             _logger.info("Circuit has %d layers, using single solve", num_layers)
-            return super().run()
+            return super().run(solver_options)
 
         # Compute overlapping windows
         windows = self._compute_windows()
