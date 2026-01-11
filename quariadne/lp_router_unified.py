@@ -1159,3 +1159,378 @@ class LpRouterUnified(BaseLPRouter):
                 best_edge_idx = edge_idx
 
         return best_edge_idx
+
+
+# =============================================================================
+# Windowed Routing Utilities
+# =============================================================================
+
+WINDOW_SCALING_FACTOR = 2
+MINIMUM_WINDOW_LAYERS = 2
+
+
+def compute_adaptive_windows(
+    n_layers: int,
+    n_ops: int,
+    n_qubits: int,
+    scaling_factor: int = WINDOW_SCALING_FACTOR,
+) -> list[tuple[int, int]]:
+    """Compute overlapping window boundaries.
+
+    Args:
+        n_layers: Total number of operation layers.
+        n_ops: Total number of operations.
+        n_qubits: Number of qubits in the circuit.
+        scaling_factor: Multiplier for qubit count (default 2).
+
+    Returns:
+        List of (start_layer, end_layer) tuples with 1-layer overlap.
+    """
+    if n_layers == 0 or n_ops == 0:
+        return []
+
+    target_ops = scaling_factor * n_qubits
+    avg_ops_per_layer = n_ops / n_layers
+    window_layers = max(MINIMUM_WINDOW_LAYERS, round(target_ops / avg_ops_per_layer))
+
+    windows: list[tuple[int, int]] = []
+    start = 0
+    while start < n_layers:
+        end = min(start + window_layers, n_layers)
+        windows.append((start, end))
+        if end >= n_layers:
+            break
+        start = end - 1
+
+    return windows
+
+
+class WindowedLpRouterUnified:
+    """Windowed LP router for large circuits.
+
+    Solves large circuits by partitioning into overlapping windows and
+    running LpRouterUnified on each window. Window size adapts based on
+    qubit count to stay in the regime where LP routing outperforms SABRE.
+
+    The overlapping approach ensures position continuity: the last layer
+    of window k becomes the first (fixed) layer of window k+1.
+
+    Attributes:
+        coupling_map: Hardware connectivity graph.
+        quantum_circuit: Circuit to route.
+        solver_options: HiGHS solver configuration.
+        window_scaling_factor: Multiplier for qubit count when computing
+            target operations per window.
+        operations: List of two-qubit operations extracted from circuit.
+        operation_layers: Operations grouped into parallel layers.
+        windows: List of (start_layer, end_layer) tuples.
+
+    Example:
+        >>> router = WindowedLpRouterUnified(topology, circuit)
+        >>> result = router.run()
+        >>> print(f"Total SWAPs: {sum(len(s) for s in result.inserted_swaps.values())}")
+    """
+
+    def __init__(
+        self,
+        coupling_map: nx.DiGraph[quariadne.circuit.PhysicalQubit],
+        quantum_circuit: quariadne.circuit.AbstractQuantumCircuit,
+        solver_options: LPSolverOptions | None = None,
+        window_scaling_factor: int = WINDOW_SCALING_FACTOR,
+    ) -> None:
+        """Initialise windowed router.
+
+        Args:
+            coupling_map: NetworkX DiGraph representing hardware connectivity.
+            quantum_circuit: Abstract quantum circuit to route.
+            solver_options: Optional HiGHS solver configuration.
+            window_scaling_factor: Multiplier for qubit count (default 2).
+                Window targets approximately `scaling_factor * n_qubits` ops.
+        """
+        self.coupling_map = coupling_map
+        self.quantum_circuit = quantum_circuit
+        self.solver_options = solver_options or LPSolverOptions()
+        self.window_scaling_factor = window_scaling_factor
+
+        # Extract only two-qubit operations (single-qubit gates don't need routing)
+        self.operations = [
+            op for op in quantum_circuit.operations if len(op.qubits_participating) == 2
+        ]
+
+        # Build layers: operations in same layer share no qubits
+        self.operation_layers = self._build_layers()
+
+        # Build edge lookup for O(1) constraint propagation
+        self.edges: list[PhysicalEdge] = list(coupling_map.edges())
+        self.edge_to_index: dict[PhysicalEdge, int] = {
+            edge: idx for idx, edge in enumerate(self.edges)
+        }
+
+        # Compute adaptive windows based on circuit size
+        self.windows = compute_adaptive_windows(
+            n_layers=len(self.operation_layers),
+            n_ops=len(self.operations),
+            n_qubits=len(quantum_circuit.qubits),
+            scaling_factor=window_scaling_factor,
+        )
+
+        _logger.info(
+            f"WindowedLpRouterUnified: {len(self.operations)} ops, "
+            f"{len(self.operation_layers)} layers, {len(self.windows)} windows"
+        )
+
+    def _build_layers(self) -> list[list[int]]:
+        """Build operation layers based on qubit dependencies.
+
+        Groups operations into parallel layers where no two operations
+        in the same layer share a qubit. Uses the same algorithm as
+        BaseLPRouter._build_operation_layers().
+
+        Returns:
+            List of layers, each containing operation indices that can
+            execute in parallel.
+        """
+        if not self.operations:
+            return []
+
+        layers: list[list[int]] = []
+        # Track the last layer where each qubit was used
+        qubit_last_layer: dict[quariadne.circuit.LogicalQubit, int] = {}
+
+        for op_idx, operation in enumerate(self.operations):
+            qubits = operation.qubits_participating
+
+            # Find earliest layer where this op can go (after all its qubits are free)
+            min_layer = 0
+            for qubit in qubits:
+                if qubit in qubit_last_layer:
+                    min_layer = max(min_layer, qubit_last_layer[qubit] + 1)
+
+            # Extend layers list if needed
+            while len(layers) <= min_layer:
+                layers.append([])
+
+            # Place operation in its layer
+            layers[min_layer].append(op_idx)
+
+            # Update qubit tracking
+            for qubit in qubits:
+                qubit_last_layer[qubit] = min_layer
+
+        return layers
+
+    def run(self) -> UnifiedLPResult:
+        """Run windowed LP routing.
+
+        For small circuits (single window), delegates directly to
+        LpRouterUnified. For large circuits, solves each window
+        sequentially and merges results.
+
+        Returns:
+            UnifiedLPResult containing edge assignments, mappings, and SWAPs.
+        """
+        # Handle empty circuit
+        if not self.operations:
+            return UnifiedLPResult(
+                objective_value=0.0,
+                operation_edge_assignment={},
+                operation_to_edge_by_qubits={},
+                initial_mapping={},
+                final_mapping={},
+                operations=[],
+                inserted_swaps={},
+            )
+
+        # Single window: no need for windowing overhead
+        if len(self.windows) <= 1:
+            _logger.info("Single window - delegating to LpRouterUnified")
+            router = LpRouterUnified(
+                self.coupling_map, self.quantum_circuit, self.solver_options
+            )
+            return router.run()
+
+        # Multiple windows: solve sequentially with constraint propagation
+        return self._solve_all_windows()
+
+    def _get_window_operations(self, start_layer: int, end_layer: int) -> list[int]:
+        """Get operation indices for a range of layers.
+
+        Args:
+            start_layer: First layer index (inclusive).
+            end_layer: Last layer index (exclusive).
+
+        Returns:
+            List of global operation indices in layer order.
+        """
+        indices: list[int] = []
+        for layer_idx in range(start_layer, end_layer):
+            indices.extend(self.operation_layers[layer_idx])
+        return indices
+
+    def _create_window_subcircuit(
+        self, operation_indices: list[int]
+    ) -> quariadne.circuit.AbstractQuantumCircuit:
+        """Create sub-circuit containing only specified operations.
+
+        Args:
+            operation_indices: Global indices of operations to include.
+
+        Returns:
+            New AbstractQuantumCircuit with selected operations.
+        """
+        selected_ops = [self.operations[i] for i in operation_indices]
+        return quariadne.circuit.AbstractQuantumCircuit(
+            qubits=self.quantum_circuit.qubits,
+            operations=selected_ops,
+        )
+
+    def _get_edge_index(self, edge: PhysicalEdge) -> int | None:
+        """Get edge index using O(1) dict lookup.
+
+        Args:
+            edge: Physical edge tuple.
+
+        Returns:
+            Edge index if found (checks both directions), None otherwise.
+        """
+        if edge in self.edge_to_index:
+            return self.edge_to_index[edge]
+        # Try reversed direction
+        reversed_edge = (edge[1], edge[0])
+        return self.edge_to_index.get(reversed_edge)
+
+    def _solve_all_windows(self) -> UnifiedLPResult:
+        """Solve all windows sequentially and merge results.
+
+        Returns:
+            Merged UnifiedLPResult from all windows.
+        """
+        start_time = time.perf_counter()
+
+        # Result accumulators
+        all_edge_assignments: dict[int, PhysicalEdge] = {}
+        all_swaps: dict[int, list[quariadne.circuit.PhysicalSwap]] = {}
+        initial_mapping: dict[
+            quariadne.circuit.LogicalQubit, quariadne.circuit.PhysicalQubit
+        ] = {}
+        final_mapping: dict[
+            quariadne.circuit.LogicalQubit, quariadne.circuit.PhysicalQubit
+        ] = {}
+        total_objective = 0.0
+
+        # Constraints from previous window: global_op_idx -> edge_idx
+        fixed_edges: dict[int, int] | None = None
+
+        for window_idx, (start_layer, end_layer) in enumerate(self.windows):
+            _logger.info(
+                f"Window {window_idx + 1}/{len(self.windows)}: "
+                f"layers [{start_layer}, {end_layer})"
+            )
+
+            # Get operations for this window
+            window_op_indices = self._get_window_operations(start_layer, end_layer)
+
+            # Build index maps
+            local_to_global = {i: g for i, g in enumerate(window_op_indices)}
+            global_to_local = {g: i for i, g in enumerate(window_op_indices)}
+
+            # Convert constraints to local indices
+            local_fixed: dict[int, int] | None = None
+            if fixed_edges:
+                local_fixed = {
+                    global_to_local[g]: e
+                    for g, e in fixed_edges.items()
+                    if g in global_to_local
+                } or None
+
+            # Solve this window
+            subcircuit = self._create_window_subcircuit(window_op_indices)
+            router = LpRouterUnified(
+                coupling_map=self.coupling_map,
+                quantum_circuit=subcircuit,
+                solver_options=self.solver_options,
+                fixed_operation_edges=local_fixed,
+            )
+            result = router.run()
+            total_objective += result.objective_value
+
+            # Merge edge assignments
+            for local_idx, edge in result.operation_edge_assignment.items():
+                all_edge_assignments[local_to_global[local_idx]] = edge
+
+            # Merge SWAPs (deduplicate at boundaries)
+            for local_idx, swaps in result.inserted_swaps.items():
+                global_idx = local_to_global[local_idx]
+                if global_idx not in all_swaps:
+                    all_swaps[global_idx] = []
+                for swap in swaps:
+                    if swap not in all_swaps[global_idx]:
+                        all_swaps[global_idx].append(swap)
+
+            # Save mappings
+            if window_idx == 0:
+                initial_mapping = result.initial_mapping
+            final_mapping = result.final_mapping
+
+            # Extract constraints for next window from shared layer
+            # Only include non-conflicting assignments (respecting position exclusivity)
+            if end_layer < len(self.operation_layers):
+                shared_layer = self.operation_layers[end_layer - 1]
+                fixed_edges = {}
+                used_positions: set[quariadne.circuit.PhysicalQubit] = set()
+
+                for global_idx in shared_layer:
+                    if global_idx in global_to_local:
+                        local_idx = global_to_local[global_idx]
+                        maybe_edge = result.operation_edge_assignment.get(local_idx)
+                        if maybe_edge is not None:
+                            edge = maybe_edge
+                            # Check if this edge conflicts with already-fixed edges
+                            if edge[0] in used_positions or edge[1] in used_positions:
+                                _logger.debug(
+                                    f"Skipping op {global_idx}: edge {edge} conflicts"
+                                )
+                                continue
+                            edge_idx = self._get_edge_index(edge)
+                            if edge_idx is not None:
+                                fixed_edges[global_idx] = edge_idx
+                                used_positions.add(edge[0])
+                                used_positions.add(edge[1])
+
+        elapsed = time.perf_counter() - start_time
+        total_swaps = sum(len(s) for s in all_swaps.values())
+        _logger.info(f"Windowed routing: {total_swaps} SWAPs in {elapsed:.2f}s")
+
+        return UnifiedLPResult(
+            objective_value=total_objective,
+            operation_edge_assignment=all_edge_assignments,
+            operation_to_edge_by_qubits=self._build_edge_by_qubits(
+                all_edge_assignments
+            ),
+            initial_mapping=initial_mapping,
+            final_mapping=final_mapping,
+            operations=self.operations,
+            inserted_swaps=all_swaps,
+        )
+
+    def _build_edge_by_qubits(
+        self, assignments: dict[int, PhysicalEdge]
+    ) -> dict[tuple[int, int, int], PhysicalEdge]:
+        """Build operation_to_edge_by_qubits from assignments.
+
+        Uses qubit indices (int) as keys to match UnifiedLPResult type.
+        """
+        result: dict[tuple[int, int, int], PhysicalEdge] = {}
+        occurrence: dict[tuple[int, int], int] = defaultdict(int)
+
+        for op_idx in sorted(assignments.keys()):
+            qubits = self.operations[op_idx].qubits_participating
+            if len(qubits) == 2:
+                # Use qubit indices for the key
+                q0_idx = qubits[0].index
+                q1_idx = qubits[1].index
+                pair = (q0_idx, q1_idx)
+                result[(q0_idx, q1_idx, occurrence[pair])] = assignments[op_idx]
+                occurrence[pair] += 1
+
+        return result
