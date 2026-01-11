@@ -5,7 +5,6 @@ import networkx as nx
 import numpy as np
 
 from quariadne.birkhoff import birkhoff_von_neumann_decomposition
-import scipy.optimize
 
 import quariadne.circuit
 from quariadne.milp import (
@@ -17,12 +16,13 @@ from quariadne.milp import (
     GateLayer,
 )
 
-# Weight for bipartite matching edges. Must be >= 0.001 to avoid numerical issues
-# in scipy.sparse.csgraph.min_weight_full_bipartite_matching which hangs on very
-# small values (< 1e-4). WORKAROUND(scipy/scipy#22370)
+# Weight for bipartite matching edges. Minimum weight ensures proper graph
+# connectivity for matching algorithms.
 # - On forcing edges: ensures self-matching is always possible
 # - On real edges: allows matching edges with 0.0 execution weight
 # - On non-coupling edges: ensures full graph connectivity
+# Note: Previously used higher values as workaround for scipy hang issues
+# (scipy/scipy#17269, scipy/scipy#14041). Now using NetworkX matcher.
 BIPARTITE_FORCING_TERM = 0.001
 BIPARTITE_NON_COUPLING_WEIGHT = 0.001
 
@@ -887,49 +887,17 @@ class LpRouterEdges(Router):
 
         return bipartite_coupling_map, node_to_qubit
 
-    def _extract_bipartite_partitions(
-        self, bipartite_graph: nx.Graph
-    ) -> tuple[list[str], list[str]]:
-        """Extract partitions from bipartite graph using bipartite node attribute.
-
-        Separates nodes into two partitions based on their bipartite attribute value.
-        Partition ordering is stable based on graph node order.
-
-        Args:
-            bipartite_graph: Bipartite graph with bipartite attribute on nodes
-
-        Returns:
-            Tuple of (first_partition, second_partition) corresponding to
-            bipartite attribute values 0 and 1 respectively
-        """
-        first_partition = [
-            node
-            for node, data in bipartite_graph.nodes(data=True)
-            if data["bipartite"] == 0
-        ]
-        second_partition = [
-            node
-            for node, data in bipartite_graph.nodes(data=True)
-            if data["bipartite"] == 1
-        ]
-        return first_partition, second_partition
-
     def _translate_bipartite_matching_to_edges(
         self,
-        row_indices: np.ndarray,
-        col_indices: np.ndarray,
-        out_partition: list[str],
-        in_partition: list[str],
+        matching: set[tuple[str, str]],
         node_to_qubit: dict[str, quariadne.circuit.PhysicalQubit],
     ) -> list[int]:
         """Translate bipartite matching result to coupling map edge indices.
 
-        The bipartite matching returns indices into the partitions:
-        - row_indices: indices into out_partition (qubit_out nodes)
-        - col_indices: indices into in_partition (qubit_in nodes)
-
-        Uses explicit node_to_qubit mapping to correctly resolve physical qubits
-        from partition node names, avoiding any assumptions about partition ordering.
+        NetworkX's max_weight_matching returns a set of edge tuples where each
+        tuple contains two node names (e.g., "PhysicalQubit(index=0)_out" and
+        "PhysicalQubit(index=1)_in"). This method resolves the node names to
+        physical qubits and maps them to coupling map edge indices.
 
         The matching result contains two types of edges:
         1. Forcing edges: where source_qubit == target_qubit, representing
@@ -938,25 +906,28 @@ class LpRouterEdges(Router):
            source_out <-> target_in, which maps to edge source -> target.
 
         Args:
-            row_indices: Row indices from matching, indexing into out_partition
-            col_indices: Column indices from matching, indexing into in_partition
-            out_partition: List of bipartite node names for the _out partition
-            in_partition: List of bipartite node names for the _in partition
+            matching: Set of edge tuples from NetworkX matching, where each
+                tuple contains two bipartite node names (order not guaranteed)
             node_to_qubit: Mapping from bipartite node names to PhysicalQubit objects
 
         Returns:
             List of edge indices into self.coupling_map.edges() for matched actual edges
 
         See Also:
-            scipy.sparse.csgraph.min_weight_full_bipartite_matching:
-            https://docs.scipy.org/doc/scipy/reference/generated/scipy.sparse.csgraph.min_weight_full_bipartite_matching.html
+            NetworkX max_weight_matching:
+            https://networkx.org/documentation/stable/reference/algorithms/generated/networkx.algorithms.matching.max_weight_matching.html
         """
         matched_edge_indices = []
 
-        for row_idx, col_idx in zip(row_indices, col_indices):
-            # Resolve physical qubits via explicit mapping (not index assumption)
-            source_node = out_partition[row_idx]
-            target_node = in_partition[col_idx]
+        for node_a, node_b in matching:
+            # Identify source (_out) and target (_in) nodes by suffix
+            # NetworkX matching returns unordered tuples
+            if node_a.endswith("_out"):
+                source_node = node_a
+                target_node = node_b
+            else:
+                source_node = node_b
+                target_node = node_a
 
             source_qubit = node_to_qubit[source_node]
             target_qubit = node_to_qubit[target_node]
@@ -1235,27 +1206,16 @@ class LpRouterEdges(Router):
                 self._split_coupling_map_to_bipartite(layer_execution_weights)
             )
 
-            # Extract partitions for biadjacency matrix construction
-            in_partition, out_partition = self._extract_bipartite_partitions(
-                bipartite_coupling_map
+            # Find maximum weight matching using NetworkX
+            # Uses Blossom algorithm with guaranteed O(n³) termination
+            # Ref: https://networkx.org/documentation/stable/reference/algorithms/generated/networkx.algorithms.matching.max_weight_matching.html
+            matching = nx.algorithms.matching.max_weight_matching(
+                bipartite_coupling_map, maxcardinality=True, weight="weight"
             )
 
-            biadjacency_matrix = nx.bipartite.biadjacency_matrix(
-                bipartite_coupling_map, out_partition, in_partition
-            )
-
-            row_indices, col_indices = (
-                scipy.sparse.csgraph.min_weight_full_bipartite_matching(
-                    biadjacency_matrix, maximize=True
-                )
-            )
-
-            # Translate matching to coupling map edge indices using explicit mapping
+            # Translate matching to coupling map edge indices
             matched_edge_indices = self._translate_bipartite_matching_to_edges(
-                row_indices,
-                col_indices,
-                list(out_partition),
-                list(in_partition),
+                matching,
                 node_to_qubit,
             )
 

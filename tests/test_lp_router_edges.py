@@ -196,3 +196,33 @@ class TestLpRouterEdgesVsIlpRouter:
         ilp_physical = list(ilp_mapping.values())
         assert len(lp_physical) == len(set(lp_physical))
         assert len(ilp_physical) == len(set(ilp_physical))
+
+
+class TestLpRouterEdgesBipartiteMatching:
+    """Regression tests for bipartite matching robustness."""
+
+    def test_networkx_matching_completes(
+        self,
+        lima_coupling_graph: nx.DiGraph,
+    ) -> None:
+        """Test that NetworkX matching completes for a small circuit.
+
+        Verifies the NetworkX max_weight_matching implementation works correctly
+        as a replacement for scipy's min_weight_full_bipartite_matching.
+
+        Ref: scipy/scipy#17269, scipy/scipy#14041
+        """
+        # Create a 5-qubit circuit with a few CX gates
+        qc = create_qiskit_circuit_with_cx_gates(5, [(0, 1), (2, 3), (1, 2)])
+        circuit = convert_to_abstract_circuit(qc)
+
+        # Should complete quickly using NetworkX matching
+        router = quariadne.routers.LpRouterEdges(
+            coupling_map=lima_coupling_graph,
+            quantum_circuit=circuit,
+        )
+
+        # Verify routing completed successfully
+        initial_mapping = router.get_initial_mapping()
+        assert initial_mapping is not None
+        assert len(initial_mapping) == 5
