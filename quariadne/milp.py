@@ -18,7 +18,7 @@ DEFAULT_CONSTRAINT_TYPE = np.float64
 
 # Optimisation coefficient constants
 QUBIT_MOVEMENT_PENALTY_COEFFICIENT = 0.5
-MILP_SOLVER_TIMEOUT_SECONDS = 3600
+MILP_SOLVER_TIMEOUT_SECONDS = 900  # 15 minutes (thesis benchmark timeout)
 
 # Constraint name constants
 LOGICAL_UNIQUENESS_CONSTRAINT = "logical_uniqueness_constraint"

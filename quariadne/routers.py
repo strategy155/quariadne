@@ -17,10 +17,14 @@ from quariadne.milp import (
     GateLayer,
 )
 
-# Small constant added to bipartite matching weights to ensure feasibility:
+# Weight for bipartite matching edges. Must be >= 0.001 to avoid numerical issues
+# in scipy.sparse.csgraph.min_weight_full_bipartite_matching which hangs on very
+# small values (< 1e-4). WORKAROUND(scipy/scipy#22370)
 # - On forcing edges: ensures self-matching is always possible
 # - On real edges: allows matching edges with 0.0 execution weight
-BIPARTITE_FORCING_TERM = 1e-6
+# - On non-coupling edges: ensures full graph connectivity
+BIPARTITE_FORCING_TERM = 0.001
+BIPARTITE_NON_COUPLING_WEIGHT = 0.001
 
 # Type alias for operation-to-edge assignment: (operation_index, edge_index)
 OperationEdgeAssignment = tuple[int, int]
@@ -858,17 +862,28 @@ class LpRouterEdges(Router):
                 physical_qubit_in, physical_qubit_out, weight=BIPARTITE_FORCING_TERM
             )
 
-        for edge_idx, (source_qubit, target_qubit) in enumerate(
-            self.coupling_map.edges()
-        ):
-            execution_weight = layer_execution_weights[edge_idx]
+        # Add ALL possible (out, in) edges to ensure full bipartite connectivity
+        # Coupling edges get execution_weight + forcing term, others get tiny weight
+        physical_qubits = list(self.coupling_map.nodes)
+        for source_qubit in physical_qubits:
             source_qubit_out = f"{source_qubit}_out"
-            target_qubit_in = f"{target_qubit}_in"
-            bipartite_coupling_map.add_edge(
-                source_qubit_out,
-                target_qubit_in,
-                weight=execution_weight + BIPARTITE_FORCING_TERM,
-            )
+            for target_qubit in physical_qubits:
+                if source_qubit == target_qubit:
+                    continue  # Skip self-loops (already have forcing edges)
+                target_qubit_in = f"{target_qubit}_in"
+
+                edge = (source_qubit, target_qubit)
+                if edge in self._edge_to_index:
+                    # Real coupling edge - use execution weight from LP
+                    edge_idx = self._edge_to_index[edge]
+                    weight = layer_execution_weights[edge_idx] + BIPARTITE_FORCING_TERM
+                else:
+                    # Non-coupling edge - tiny weight to ensure connectivity
+                    weight = BIPARTITE_NON_COUPLING_WEIGHT
+
+                bipartite_coupling_map.add_edge(
+                    source_qubit_out, target_qubit_in, weight=weight
+                )
 
         return bipartite_coupling_map, node_to_qubit
 
