@@ -195,8 +195,12 @@ class LpRouterUnified(BaseLPRouter):
         return circuit
 
     def _get_operations(self) -> list[quariadne.circuit.QuantumOperation]:
-        """Get all operations from the circuit."""
-        return list(self.routed_circuit.operations)
+        """Get two-qubit operations from the circuit.
+
+        Only two-qubit operations require routing; single-qubit gates execute
+        on any physical qubit without edge assignment.
+        """
+        return list(self.routed_circuit.get_two_qubit_operations())
 
     def _setup_variable_indexing(self) -> None:
         """Set up variable indexing for unified formulation."""
