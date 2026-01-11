@@ -160,14 +160,28 @@ class LpRouterUnified(BaseLPRouter):
         quantum_circuit: quariadne.circuit.AbstractQuantumCircuit,
         solver_options: LPSolverOptions | None = None,
         fixed_operation_edges: dict[int, int] | None = None,
+        initial_position_mapping: (
+            dict[quariadne.circuit.LogicalQubit, quariadne.circuit.PhysicalQubit] | None
+        ) = None,
     ) -> None:
-        """Initialise the unified LP router."""
+        """Initialise the unified LP router.
+
+        Args:
+            coupling_map: Hardware connectivity graph.
+            quantum_circuit: Circuit to route.
+            solver_options: Optional HiGHS solver configuration.
+            fixed_operation_edges: Optional dict fixing operations to edges.
+            initial_position_mapping: Optional dict mapping logical qubits to
+                their required initial physical positions. Used by LpRouterLayered
+                to propagate positions between layer solves.
+        """
         super().__init__(
             coupling_map=coupling_map,
             quantum_circuit=quantum_circuit,
             solver_options=solver_options,
             fixed_operation_edges=fixed_operation_edges,
         )
+        self.initial_position_mapping = initial_position_mapping
 
         # Build unified transitions (specific to this router)
         self.transitions = self._build_operation_pair_transitions()
@@ -279,6 +293,102 @@ class LpRouterUnified(BaseLPRouter):
             + to_edge_index
         )
         return self.z_var_offset + local_index
+
+    def _add_initial_position_constraints(self, highs_model: highspy.Highs) -> None:
+        """Constrain initial qubit positions for first operations.
+
+        This method enforces position continuity between layered LP solves by
+        constraining each qubit's first operation to use edges where that qubit
+        is at its required initial position.
+
+        Mathematical approach:
+            For each qubit Q with required position P, let first_op be Q's
+            first operation in the circuit. We set:
+                y_{first_op, e} = 0  for all edges e where Q is NOT at position P
+
+            Combined with the uniqueness constraint (Σ_e y_{o,e} = 1), this
+            forces Q to be at position P for its first operation.
+
+        CRITICAL: We ONLY constrain qubits whose first operation is in layer 1+
+        (not layer 0). Layer 0 operations must remain free to choose their own
+        edge assignments. This is because:
+            1. Position exclusivity: operations in the same layer can't share
+               physical positions
+            2. If multiple qubits in layer 0 were assigned the same position
+               in the previous iteration, constraining them would make the LP
+               infeasible
+
+        The constraint propagation works because:
+            - Layer 0 executes freely, finding optimal edge assignments
+            - Layer 1+ operations are constrained by flow from layer 0
+            - Qubits appearing in both layer 0 and 1+ get their position from
+              the LP's flow conservation, not from initial constraints
+
+        Reference:
+            Thesis 03-method.tex lines 147-157: W^t mapping variables for
+            initial position constraints.
+
+        Args:
+            highs_model: The HiGHS model instance with variables already added.
+        """
+        if self.initial_position_mapping is None:
+            return
+
+        # Build set of operations in layer 0 (first layer of subcircuit).
+        # These operations must remain unconstrained to avoid position conflicts.
+        layer_0_operations: set[int] = set()
+        if self.operation_layers:
+            layer_0_operations = set(self.operation_layers[0])
+
+        constraints_added = 0
+        qubits_constrained = 0
+
+        for qubit, required_position in self.initial_position_mapping.items():
+            # Skip qubits not participating in any two-qubit operation
+            if qubit not in self.qubit_operations:
+                continue
+
+            operation_indices = self.qubit_operations[qubit].operation_indices
+            if not operation_indices:
+                continue
+
+            # Get qubit's first operation in this circuit
+            first_operation_index = operation_indices[0]
+
+            # CRITICAL: Skip qubits whose first operation is in layer 0.
+            # These operations need freedom to pick edges without conflicting
+            # with other layer 0 operations. Constraints on layer 0 operations
+            # can cause infeasibility when multiple qubits require the same
+            # physical position (position exclusivity violation).
+            if first_operation_index in layer_0_operations:
+                continue
+
+            first_operation = self.operations[first_operation_index]
+            left_qubit, right_qubit = first_operation.qubits_participating
+
+            # Determine qubit's position within the edge: left (edge[0]) or right (edge[1])
+            # Edge assignment (q0, q1) means q0 sits at position edge[0], q1 at edge[1]
+            is_left_qubit = qubit == left_qubit
+
+            # Forbid edges where qubit would be at the wrong position
+            for edge_index, edge in enumerate(self.edges):
+                qubit_position_on_edge = edge[0] if is_left_qubit else edge[1]
+
+                if qubit_position_on_edge != required_position:
+                    # Set y_{first_op, edge} = 0 by fixing bounds to [0, 0]
+                    y_variable_index = self._get_y_var_index(
+                        first_operation_index, edge_index
+                    )
+                    highs_model.changeColBounds(y_variable_index, 0.0, 0.0)
+                    constraints_added += 1
+
+            qubits_constrained += 1
+
+        if constraints_added > 0:
+            _logger.debug(
+                f"Added {constraints_added} initial position constraints "
+                f"for {qubits_constrained} qubits (skipped layer 0 operations)"
+            )
 
     def _add_flow_conservation_constraints(self, highs_model: highspy.Highs) -> None:
         """Add outflow-only flow conservation constraints.
@@ -1001,6 +1111,7 @@ class LpRouterUnified(BaseLPRouter):
         self._add_variables(highs_model)
         self._add_operation_uniqueness_constraints(highs_model)
         self._add_position_exclusivity_constraints(highs_model)
+        self._add_initial_position_constraints(highs_model)  # layer continuity
         self._add_flow_conservation_constraints(highs_model)  # outflow
         self._add_inflow_constraints(highs_model)  # inflow (for tighter LP relaxation)
         self._add_mccormick_lower_bounds(highs_model)  # z ≥ y₁ + y₂ - 1
