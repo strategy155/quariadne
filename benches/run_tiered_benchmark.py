@@ -55,6 +55,7 @@ import quariadne.benchmarks.constants as bench_const
 import quariadne.benchmarks.topology_generators as topo_gen
 import quariadne.bipartite_allocation_lp
 import quariadne.circuit
+import quariadne.lp_router_layered
 import quariadne.milp
 import quariadne.routers
 
@@ -229,6 +230,7 @@ ROUTER_NAMES: list[str] = [
     "IlpRouter",
     "LpRouterEdges",
     "LpRouterMapping",
+    "LpRouterLayered",
     "BipartiteAllocationRouter",
     "SABRE",
 ]
@@ -392,6 +394,32 @@ def time_bipartite_router(
     return time_router_execution(
         "BipartiteAllocationRouter", original_gate_count, execute
     )
+
+
+def time_layered_router(
+    coupling_map: qiskit.transpiler.CouplingMap,
+    circuit: quariadne.circuit.AbstractQuantumCircuit,
+) -> RouterBenchmarkResult:
+    """Time LpRouterLayered (layer-by-layer LP routing).
+
+    Args:
+        coupling_map: Qiskit CouplingMap (converted to DiGraph internally).
+        circuit: AbstractQuantumCircuit to route.
+
+    Returns:
+        RouterBenchmarkResult with timing and gate count data.
+    """
+    original_gate_count = len(circuit.get_two_qubit_operations())
+
+    def execute() -> tuple[int, int]:
+        coupling_graph = quariadne.milp.get_coupling_graph(coupling_map)
+        router = quariadne.lp_router_layered.LpRouterLayered(coupling_graph, circuit)
+        result = router.run()
+        swap_count = sum(len(swaps) for swaps in result.inserted_swaps.values())
+        final_gate_count = original_gate_count + (swap_count * SWAP_TO_CX_COUNT)
+        return swap_count, final_gate_count
+
+    return time_router_execution("LpRouterLayered", original_gate_count, execute)
 
 
 def time_sabre_router(
@@ -614,6 +642,9 @@ def run_single_tiered_benchmark(
             quariadne.routers.LpRouterMapping, coupling_map, abstract_circuit
         )
     )
+
+    # LpRouterLayered (layer-by-layer LP routing)
+    results.append(time_layered_router(coupling_map, abstract_circuit))
 
     # BipartiteAllocationRouter (always attempted, may fail gracefully)
     results.append(time_bipartite_router(coupling_map, abstract_circuit))
