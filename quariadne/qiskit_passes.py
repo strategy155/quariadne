@@ -1,4 +1,3 @@
-from typing import List, Dict, Union
 from enum import Enum
 import quariadne.computational_graph
 import quariadne.milp
@@ -33,7 +32,7 @@ class MilpLayout(qiskit.transpiler.AnalysisPass):
 
     def __init__(
         self,
-        coupling_map: Union[qiskit.transpiler.CouplingMap, qiskit.transpiler.Target],
+        coupling_map: qiskit.transpiler.CouplingMap | qiskit.transpiler.Target,
         mode: RoutingMode = RoutingMode.ILP,
     ) -> None:
         """Initialise MILP layout pass with backend coupling constraints.
@@ -73,11 +72,11 @@ class MilpLayout(qiskit.transpiler.AnalysisPass):
 
     def _generate_physical_qubit_indices(
         self,
-        physical_by_logical_mapping: Dict[
+        physical_by_logical_mapping: dict[
             quariadne.circuit.LogicalQubit, quariadne.circuit.PhysicalQubit
         ],
         dag_qubit_count: int,
-    ) -> List[int]:
+    ) -> list[int]:
         """Extract physical qubit indices from MILP mapping solution for layout creation.
 
         Args:
@@ -92,8 +91,12 @@ class MilpLayout(qiskit.transpiler.AnalysisPass):
             physical_by_logical_mapping.keys(), key=lambda qubit: qubit.index
         )
 
-        # Filter to only include qubits that exist in the DAG, excluding dummy qubits
-        # TODO: DIRTY THING DUE TO THE WAY HOW QISKIT WORKS
+        # Filter out dummy qubits added to match hardware qubit count.
+        # Qiskit's Layout.from_intlist() expects exactly dag.num_qubits() indices
+        # corresponding to the logical qubits in the original circuit. Dummy qubits
+        # (indices >= dag_qubit_count) fill hardware positions but are not part of
+        # the logical circuit.
+        # Reference: https://docs.quantum.ibm.com/api/qiskit/qiskit.transpiler.Layout
         valid_logical_qubits = [
             qubit for qubit in sorted_logical_qubits if qubit.index < dag_qubit_count
         ]
@@ -168,7 +171,7 @@ class MilpRouting(qiskit.transpiler.TransformationPass):
         self,
         canonical_register: qiskit.circuit.QuantumRegister,
         current_layout: qiskit.transpiler.Layout,
-        swaps: List[quariadne.circuit.PhysicalSwap],
+        swaps: list[quariadne.circuit.PhysicalSwap],
     ) -> qiskit.dagcircuit.DAGCircuit:
         """Create DAG containing SWAP operations for a specific layer.
 
@@ -203,7 +206,7 @@ class MilpRouting(qiskit.transpiler.TransformationPass):
     def _apply_swaps_to_layout(
         self,
         current_layout: qiskit.transpiler.Layout,
-        swaps: List[quariadne.circuit.PhysicalSwap],
+        swaps: list[quariadne.circuit.PhysicalSwap],
     ) -> qiskit.transpiler.Layout:
         """Apply SWAP operations to layout and return updated layout.
 
@@ -459,7 +462,7 @@ class BipartiteLayout(qiskit.transpiler.AnalysisPass):
 
     def __init__(
         self,
-        coupling_map: Union[qiskit.transpiler.CouplingMap, qiskit.transpiler.Target],
+        coupling_map: qiskit.transpiler.CouplingMap | qiskit.transpiler.Target,
     ) -> None:
         """Initialise bipartite layout pass with backend coupling constraints.
 
@@ -496,11 +499,11 @@ class BipartiteLayout(qiskit.transpiler.AnalysisPass):
 
     def _generate_physical_qubit_indices(
         self,
-        physical_by_logical_mapping: Dict[
+        physical_by_logical_mapping: dict[
             quariadne.circuit.LogicalQubit, quariadne.circuit.PhysicalQubit
         ],
         dag_qubit_count: int,
-    ) -> List[int]:
+    ) -> list[int]:
         """Extract physical qubit indices from LP mapping solution for layout creation.
 
         Args:
@@ -577,7 +580,7 @@ class BipartiteRouting(qiskit.transpiler.TransformationPass):
         self,
         canonical_register: qiskit.circuit.QuantumRegister,
         current_layout: qiskit.transpiler.Layout,
-        swaps: List[quariadne.circuit.PhysicalSwap],
+        swaps: list[quariadne.circuit.PhysicalSwap],
     ) -> qiskit.dagcircuit.DAGCircuit:
         """Create DAG containing SWAP operations for a specific operation.
 
@@ -613,7 +616,7 @@ class BipartiteRouting(qiskit.transpiler.TransformationPass):
     def _apply_swaps_to_layout(
         self,
         current_layout: qiskit.transpiler.Layout,
-        swaps: List[quariadne.circuit.PhysicalSwap],
+        swaps: list[quariadne.circuit.PhysicalSwap],
     ) -> qiskit.transpiler.Layout:
         """Apply SWAP operations to layout and return updated layout.
 
@@ -642,7 +645,7 @@ class BipartiteRouting(qiskit.transpiler.TransformationPass):
         q1_phys: int,
         required_left: int,
         required_right: int,
-    ) -> List[quariadne.circuit.PhysicalSwap]:
+    ) -> list[quariadne.circuit.PhysicalSwap]:
         """Compute swaps to move qubits to required edge positions.
 
         Uses iterative approach: move each qubit to its required position,
@@ -660,10 +663,10 @@ class BipartiteRouting(qiskit.transpiler.TransformationPass):
         """
         import networkx as nx
 
-        swaps: List[quariadne.circuit.PhysicalSwap] = []
+        swaps: list[quariadne.circuit.PhysicalSwap] = []
 
         # Build graph for shortest path computation
-        graph = nx.Graph()
+        graph: nx.Graph[int] = nx.Graph()
         graph.add_edges_from(self.coupling_map.get_edges())
 
         # Track positions (will be modified by swaps)
@@ -754,7 +757,7 @@ class BipartiteRouting(qiskit.transpiler.TransformationPass):
         current_layout = trivial_layout.copy()
 
         # Track qubit pair occurrence counts for operation matching
-        qubit_pair_counts: Dict[tuple, int] = {}
+        qubit_pair_counts: dict[tuple, int] = {}
 
         # Process each layer
         for layer in dag.serial_layers():

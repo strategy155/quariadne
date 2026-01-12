@@ -741,7 +741,8 @@ class BipartiteAllocationRouter:
         # Edge exclusivity constraints have linear dependencies with operation
         # uniqueness (sum over positions = 2 * sum over operations in layer).
         # This causes Eigen's PardisoLDLT to fail on the singular KKT matrix.
-        # TODO(quariadne): Fix edge exclusivity formulation to be full-rank.
+        # Known limitation: reformulating edge exclusivity to be full-rank requires
+        # significant constraint matrix restructuring.
         if solver_options.solver == "hipo":
             highs_model.setOptionValue("presolve", "off")
 

@@ -1,5 +1,4 @@
 import dataclasses
-import typing
 import networkx as nx
 import abc
 import matplotlib.pyplot as plt
@@ -10,18 +9,18 @@ import quariadne.circuit
 
 
 # This type represents all the DAG nodes, which are meaningful for our computations
-type QiskitDAGNode = typing.Union[
-    qiskit.dagcircuit.DAGOpNode,
-    qiskit.dagcircuit.DAGInNode,
-    qiskit.dagcircuit.DAGOutNode,
-]
+type QiskitDAGNode = (
+    qiskit.dagcircuit.DAGOpNode
+    | qiskit.dagcircuit.DAGInNode
+    | qiskit.dagcircuit.DAGOutNode
+)
 
 # This type is a mapping of what qiskit library returns by the edges method on the DAG circuit.
-type QiskitDAGEdge = typing.Tuple[QiskitDAGNode, QiskitDAGNode, qiskit.circuit.Qubit]
+type QiskitDAGEdge = tuple[QiskitDAGNode, QiskitDAGNode, qiskit.circuit.Qubit]
 
 
 # This type represents the special format of the nx edges
-type NXEdge = typing.Tuple[ComputationalNode, ComputationalNode]
+type NXEdge = tuple[ComputationalNode, ComputationalNode]
 
 DAG_VISUALISATION_TITLE = "Visualised DAG"
 
@@ -132,8 +131,8 @@ class ComputationalDAG:
         transitions: List of state transitions between nodes in the circuit.
     """
 
-    nodes: typing.List[ComputationalNode]
-    transitions: typing.List[Transition]
+    nodes: list[ComputationalNode]
+    transitions: list[Transition]
 
     @staticmethod
     def _convert_qiskit_dag_node(

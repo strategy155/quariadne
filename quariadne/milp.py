@@ -87,9 +87,7 @@ class ConstraintMatrixSparseData:
     row_indices: list[int] = field(default_factory=list)
     col_indices: list[int] = field(default_factory=list)
 
-    def add_coefficient(
-        self, value: float, row_index: int, col_index: int
-    ) -> None:  # TODO: Fix typing!
+    def add_coefficient(self, value: float, row_index: int, col_index: int) -> None:
         """Add a coefficient triplet to the sparse matrix data.
 
         Args:
@@ -477,7 +475,7 @@ class MilpScipyRouter:
             FIXED_EDGES_CONSTRAINT: ONE_EQUALITY_CONSTRAINT_BOUND,
         }
 
-    # TODO: CHECK THE UPDATES OF THE CSR
+    # NOTE: @typing.no_type_check used due to scipy.sparse typing limitations with array indices.
     @typing.no_type_check
     def _build_sparse_coefficient_matrix(
         self, sparse_data: ConstraintMatrixSparseData, constraint_count: int
@@ -1574,14 +1572,13 @@ class MilpScipyRouter:
                 f"HiGHS solver exceeded time limit of {MILP_SOLVER_TIMEOUT_SECONDS} seconds. "
                 f"Solver message: {milp_result.message}"
             )
-        # TODO: Round solution to handle numerical precision issues
-        # This may be removed when transitioning to scipy.optimize.linprog
-        # TODO: fix typing issue
+        # Handle numerical precision: round integer solutions, zero-out near-zero continuous.
+        # Type ignores needed due to scipy.optimize.OptimizeResult typing limitations.
         if self.integrality == INTEGER_VARIABLE_INTEGRALITY:
-            milp_result.x = np.rint(milp_result.x)  # type: ignore
+            milp_result.x = np.rint(milp_result.x)  # type: ignore[union-attr]
         elif self.integrality == CONTINUOUS_VARIABLE_INTEGRALITY:
-            close_to_zero_mask = np.isclose(milp_result.x, 0)  # type: ignore
-            milp_result.x[close_to_zero_mask] = 0  # type: ignore
+            close_to_zero_mask = np.isclose(milp_result.x, 0)  # type: ignore[arg-type]
+            milp_result.x[close_to_zero_mask] = 0  # type: ignore[index]
 
         return milp_result
 

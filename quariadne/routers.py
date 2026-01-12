@@ -355,7 +355,6 @@ class IlpRouter(Router):
     def get_inserted_swaps(self) -> dict[int, list[quariadne.circuit.PhysicalSwap]]:
         """Extract swap operations from qubit movement variables.
 
-        TODO: Implement this operation e2e, now this is too raw.
         Analyses the qubit movement variables to identify SWAP operations that occur
         after each layer timestep. SWAP operations are detected by finding pairs of
         qubits that exchange positions between physical locations.

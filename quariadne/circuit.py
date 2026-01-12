@@ -34,8 +34,8 @@ class LogicalQubit:
 
     @classmethod
     def from_qiskit_wires(
-        cls, qiskit_wires: typing.List[qiskit.circuit.Qubit]
-    ) -> typing.Tuple[typing.Self, ...]:
+        cls, qiskit_wires: list[qiskit.circuit.Qubit]
+    ) -> tuple[typing.Self, ...]:
         """This function takes a set of qiskit wires, and converts it to corresponding
         logical qubit iterable.
 
@@ -91,7 +91,7 @@ class QuantumOperation:
     """
 
     name: str
-    qubits_participating: typing.Tuple[LogicalQubit, ...]
+    qubits_participating: tuple[LogicalQubit, ...]
 
     @classmethod
     def from_qiskit_instruction(
@@ -130,8 +130,8 @@ class AbstractQuantumCircuit:
 
     """
 
-    operations: typing.List[QuantumOperation]
-    qubits: typing.Tuple[LogicalQubit, ...]
+    operations: list[QuantumOperation]
+    qubits: tuple[LogicalQubit, ...]
 
     @classmethod
     def from_qiskit_circuit(cls, qiskit_circuit: qiskit.QuantumCircuit) -> typing.Self:
@@ -171,7 +171,7 @@ class AbstractQuantumCircuit:
         corresponding_abstract_circuit = cls(operations, computational_qubits)
         return corresponding_abstract_circuit
 
-    def get_two_qubit_operations(self) -> typing.List[QuantumOperation]:
+    def get_two_qubit_operations(self) -> list[QuantumOperation]:
         """Extract two-qubit operations from the circuit.
 
         Filters the circuit operations to include only two-qubit gates, which are the
